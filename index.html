@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure Video Chat | プライバシーを重視した暗号化ビデオ通話</title>
+    <meta name="description" content="エンドツーエンドの暗号化を実装した安全なビデオ通話サービス">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- ヘッダーセクション -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fas fa-shield-alt"></i>
+                <h1>Secure Video Chat</h1>
+            </div>
+            <div class="connection-status">
+                <span class="status-indicator"></span>
+                <span id="connectionStatus">未接続</span>
+            </div>
+        </header>
+
+        <!-- メインコンテンツ -->
+        <main class="main-content">
+            <!-- 接続設定パネル -->
+            <section class="connection-panel">
+                <div class="security-info">
+                    <h2><i class="fas fa-key"></i> セキュリティ情報</h2>
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <label>あなたのID</label>
+                            <div class="copy-field">
+                                <input type="text" id="localPeerId" readonly>
+                                <button class="copy-btn" data-target="localPeerId">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="info-item">
+                            <label>暗号化キー</label>
+                            <div class="copy-field">
+                                <input type="text" id="encryptionKey" readonly>
+                                <button class="copy-btn" data-target="encryptionKey">
+                                    <i class="fas fa-copy"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="connection-controls">
+                    <div class="input-group">
+                        <i class="fas fa-user"></i>
+                        <input type="text" id="remotePeerId" placeholder="相手のIDを入力">
+                    </div>
+                    <div class="button-group">
+                        <button id="connectButton" class="primary-button">
+                            <i class="fas fa-phone"></i>
+                            <span>接続</span>
+                        </button>
+                        <button id="disconnectButton" class="danger-button" disabled>
+                            <i class="fas fa-phone-slash"></i>
+                            <span>切断</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ビデオグリッド -->
+            <section class="video-grid">
+                <div class="video-container local">
+                    <video id="localVideo" autoplay playsinline muted></video>
+                    <div class="video-overlay">
+                        <span class="participant-name">あなた</span>
+                        <div class="video-controls">
+                            <button id="toggleMicButton" class="control-button">
+                                <i class="fas fa-microphone"></i>
+                            </button>
+                            <button id="toggleVideoButton" class="control-button">
+                                <i class="fas fa-video"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="video-container remote">
+                    <video id="remoteVideo" autoplay playsinline></video>
+                    <div class="video-overlay">
+                        <span class="participant-name">相手</span>
+                        <div class="connection-quality">
+                            <i class="fas fa-signal"></i>
+                            <span id="connectionQuality">待機中...</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- フッター -->
+        <footer class="app-footer">
+            <div class="encryption-status">
+                <i class="fas fa-lock"></i>
+                <span>エンドツーエンド暗号化通信</span>
+            </div>
+            <div class="app-info">
+                <span>AES-GCM 256bit暗号化</span>
+                <span class="separator">|</span>
+                <span>WebRTC P2P通信</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- 通知モーダル -->
+    <div id="notificationModal" class="modal">
+        <div class="modal-content">
+            <i class="modal-icon"></i>
+            <p class="modal-message"></p>
+            <button class="modal-close">OK</button>
+        </div>
+    </div>
+
+    <!-- スクリプト -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.4.7/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/webcrypto-shim/0.1.7/webcrypto-shim.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
