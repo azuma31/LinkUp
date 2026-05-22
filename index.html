@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LinkUp</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="style.css" rel="stylesheet">
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <!-- Firebase SDK (compat版 - シンプルなAPIで使いやすい) -->
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-database-compat.js"></script>
+    <!-- Firebase 設定（自分のプロジェクトの設定に書き換えてください） -->
+    <script src="firebase-config.js"></script>
+</head>
+<body>
+
+<!-- ========== ログイン・登録画面 ========== -->
+<div id="authScreen" class="screen">
+
+    <!-- 自動ログイン中オーバーレイ -->
+    <div id="autoLoginOverlay" class="autologin-overlay" style="display:none">
+        <div class="autologin-overlay-card">
+            <div class="autologin-spinner">
+                <i class="fas fa-video autologin-logo-icon"></i>
+                <div class="autologin-ring"></div>
+            </div>
+            <p class="autologin-name" id="autoLoginName"></p>
+            <p class="autologin-status" id="autoLoginStatus">セッションを確認中...</p>
+        </div>
+    </div>
+
+    <div class="auth-container">
+        <div class="auth-card">
+            <div class="auth-logo">
+                <i class="fas fa-video"></i>
+                <h1>LinkUp</h1>
+                <p>安全なP2P暗号化ビデオ通話</p>
+            </div>
+
+            <!-- タブ切り替え -->
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-tab="login">ログイン</button>
+                <button class="auth-tab" data-tab="register">新規登録</button>
+            </div>
+
+            <!-- ログインフォーム -->
+            <div id="loginForm" class="auth-form">
+                <div class="form-group">
+                    <label><i class="fas fa-user"></i> 本名</label>
+                    <input type="text" id="loginName" placeholder="本名を入力" maxlength="20" autocomplete="username">
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-lock"></i> パスワード</label>
+                    <div class="password-wrap">
+                        <input type="password" id="loginPassword" placeholder="パスワードを入力" autocomplete="current-password">
+                        <button class="pw-toggle-btn" data-target="loginPassword" tabindex="-1">
+                            <i class="fas fa-eye-slash"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="form-group autologin-row">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="autoLoginCheck">
+                        <span class="checkbox-custom"></span>
+                        ログイン状態を保持する（自動ログイン）
+                    </label>
+                </div>
+                <p class="auth-error" id="loginError"></p>
+                <button id="loginBtn" class="auth-submit-btn">
+                    <i class="fas fa-sign-in-alt"></i>
+                    ログイン
+                </button>
+            </div>
+
+            <!-- 登録フォーム -->
+            <div id="registerForm" class="auth-form" style="display:none">
+                <div class="form-group">
+                    <label><i class="fas fa-user"></i> 本名</label>
+                    <input type="text" id="registerName" placeholder="本名（20文字以内）" maxlength="20" autocomplete="username">
+                    <span class="form-hint">例: 田中太郎</span>
+                </div>
+                <div class="form-group">
+                    <label><i class="fas fa-lock"></i> パスワード</label>
+                    <div class="password-wrap">
+                        <input type="password" id="registerPassword" placeholder="半角英数字4文字以上" autocomplete="new-password">
+                        <button class="pw-toggle-btn" data-target="registerPassword" tabindex="-1">
+                            <i class="fas fa-eye-slash"></i>
+                        </button>
+                    </div>
+                    <span class="form-hint">半角英数字のみ・4文字以上</span>
+                </div>
+                <p class="auth-error" id="registerError"></p>
+                <button id="registerBtn" class="auth-submit-btn">
+                    <i class="fas fa-user-plus"></i>
+                    アカウントを作成
+                </button>
+            </div>
+
+            <div class="auth-footer-note">
+                <i class="fas fa-lock"></i>
+                AES-GCM 256bit暗号化 &nbsp;|&nbsp; WebRTC P2P通信
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== メイン画面（ユーザーリスト＋通話） ========== -->
+<div id="mainScreen" class="screen" style="display:none">
+    <div class="app-container">
+
+        <!-- ヘッダー -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fas fa-video"></i>
+                <h1>LinkUp</h1>
+            </div>
+
+            <div class="header-center">
+                <div class="connection-status">
+                    <span class="status-indicator" id="statusIndicator"></span>
+                    <span id="connectionStatus">準備中...</span>
+                </div>
+            </div>
+
+            <div class="header-right">
+                <!-- セキュリティ情報トグルボタン -->
+                <button id="securityToggleBtn" class="icon-button" title="セキュリティ情報">
+                    <i class="fas fa-shield-alt"></i>
+                </button>
+                <!-- DMボタン -->
+                <button id="dmBtn" class="icon-button" title="ダイレクトメッセージ">
+                    <i class="fas fa-comment-dots"></i>
+                    <span class="badge" id="dmBadge" style="display:none"></span>
+                </button>
+                <!-- グループチャットボタン -->
+                <button id="groupBtn" class="icon-button" title="グループチャット">
+                    <i class="fas fa-comments"></i>
+                    <span class="badge" id="groupBadge" style="display:none"></span>
+                </button>
+                <!-- フレンドボタン -->
+                <button id="friendBtn" class="icon-button" title="フレンド">
+                    <i class="fas fa-user-friends"></i>
+                    <span class="badge" id="friendRequestBadge" style="display:none"></span>
+                </button>
+                <!-- 設定ボタン -->
+                <button id="settingsBtn" class="icon-button" title="設定">
+                    <i class="fas fa-cog"></i>
+                </button>
+                <!-- ログアウト -->
+                <div class="user-menu">
+                    <span id="headerUserName" class="header-username"></span>
+                    <button id="logoutBtn" class="icon-button" title="ログアウト">
+                        <i class="fas fa-sign-out-alt"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- セキュリティ情報パネル -->
+        <div id="securityPanel" class="security-panel collapsed">
+            <div class="security-panel-inner">
+                <div class="info-grid">
+                    <div class="info-item">
+                        <label>あなたのピアID</label>
+                        <div class="copy-field">
+                            <input type="text" id="localPeerId" readonly>
+                            <button class="copy-btn" data-target="localPeerId" title="IDをコピー">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="info-item">
+                        <label>暗号化キー</label>
+                        <div class="copy-field key-field">
+                            <input type="password" id="encryptionKey" readonly>
+                            <button class="toggle-visibility-btn">
+                                <i class="fas fa-eye-slash"></i>
+                            </button>
+                            <button class="copy-btn" data-target="encryptionKey" title="キーをコピー">
+                                <i class="fas fa-copy"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <main class="main-content" role="main">
+            <div class="main-layout">
+
+                <!-- 左：オンラインユーザーリスト -->
+                <aside class="users-panel">
+                    <div class="panel-header">
+                        <h2><i class="fas fa-users"></i> オンライン</h2>
+                        <button id="refreshListBtn" class="icon-button" title="リスト更新">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                    <div id="userList" class="user-list">
+                        <div class="user-list-empty">
+                            <i class="fas fa-user-slash"></i>
+                            <p>オンラインのユーザーがいません</p>
+                        </div>
+                    </div>
+                </aside>
+
+                <!-- 右：ビデオエリア -->
+                <section class="video-area">
+                    <!-- 待機中の表示 -->
+                    <div id="waitingState" class="waiting-state">
+                        <div class="waiting-icon">
+                            <i class="fas fa-phone"></i>
+                        </div>
+                        <p class="waiting-title">LinkUpへようこそ！</p>
+                    </div>
+
+                    <!-- ビデオグリッド -->
+                    <div id="videoGrid" class="video-grid" style="display:none">
+                        <div class="video-container local">
+                            <video id="localVideo" autoplay muted playsinline></video>
+                            <div class="video-overlay">
+                                <span class="participant-name" id="localName">あなた</span>
+                                <div class="video-controls">
+                                    <button id="toggleMicButton" class="control-button" title="マイク切替">
+                                        <i class="fas fa-microphone"></i>
+                                    </button>
+                                    <button id="toggleVideoButton" class="control-button" title="カメラ切替">
+                                        <i class="fas fa-video"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="video-container remote">
+                            <video id="remoteVideo" autoplay playsinline></video>
+                            <div class="video-overlay">
+                                <span class="participant-name" id="remoteName">相手</span>
+                                <div class="video-controls">
+                                    <div class="connection-quality">
+                                        <span id="connectionQuality">待機中...</span>
+                                    </div>
+                                    <button id="volumeControlButton" class="control-button" title="音量">
+                                        <i class="fas fa-volume-up"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="volume-slider-container">
+                                <div class="volume-label">
+                                    <span>音量 <span id="volumeValue">100</span>%</span>
+                                    <span class="boost-badge" id="boostBadge">BOOST</span>
+                                </div>
+                                <input type="range" id="volumeSlider" class="volume-slider" min="0" max="300" value="100" step="2">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 通話中の切断ボタン -->
+                    <div id="callControls" class="call-controls" style="display:none">
+                        <button id="disconnectButton" class="end-call-btn">
+                            <i class="fas fa-phone-slash"></i>
+                            通話を終了
+                        </button>
+                    </div>
+                </section>
+            </div>
+        </main>
+
+        <footer class="app-footer">
+            <div class="encryption-status">
+                <i class="fas fa-lock"></i>
+                エンドツーエンド暗号化通信
+                <span class="separator">|</span>
+                AES-GCM 256bit暗号化
+                <span class="separator">|</span>
+                WebRTC P2P通信
+            </div>
+            <div class="shortcut-setting">
+                <label class="shortcut-label">
+                    <i class="fas fa-bolt"></i>
+                    Shift×3 ジャンプ先
+                </label>
+                <div class="shortcut-input-wrap">
+                    <input type="url" id="shiftShortcutUrl" placeholder="https://example.com" spellcheck="false">
+                    <button id="saveShortcutBtn" class="shortcut-save-btn" title="保存">
+                        <i class="fas fa-check"></i>
+                    </button>
+                </div>
+                <span class="shortcut-saved-msg" id="shortcutSavedMsg">保存しました</span>
+            </div>
+        </footer>
+    </div>
+</div>
+
+<!-- ========== 権限説明モーダル ========== -->
+<div id="permissionModal" class="modal">
+    <div class="modal-content permission-modal-content">
+        <div class="permission-icon-wrap">
+            <i class="fas fa-video permission-icon"></i>
+        </div>
+        <h2 class="permission-title">カメラとマイクについて</h2>
+        <p class="permission-desc">ビデオ通話を開始すると、ブラウザがカメラとマイクの使用許可を求めます。</p>
+
+        <ul class="permission-list">
+            <li>
+                <i class="fas fa-video"></i>
+                <div>
+                    <strong>カメラ</strong>
+                    <span>通話中に自分の映像を相手に送信するために使用します。</span>
+                </div>
+            </li>
+            <li>
+                <i class="fas fa-microphone"></i>
+                <div>
+                    <strong>マイク</strong>
+                    <span>通話中に自分の音声を相手に送信するために使用します。</span>
+                </div>
+            </li>
+        </ul>
+
+        <div class="permission-note-box">
+            <i class="fas fa-info-circle permission-note-icon"></i>
+            <p class="permission-note-text">
+                許可しなくても通話に参加できます。<br>
+                その場合、<strong>自分の映像・音声は相手に届きません</strong>が、<strong>相手の音声と映像は受信できます。</strong>
+            </p>
+        </div>
+
+        <div class="permission-popup-guide">
+            <div class="popup-guide-title">
+                <i class="fas fa-exclamation-triangle"></i>
+                ポップアップがブロックされた場合の許可手順
+            </div>
+            <ol class="popup-guide-steps">
+                <li>アドレスバー右端に表示される <strong>ブロックアイコン（🚫または⊘）</strong> をクリック</li>
+                <li>「<strong>ポップアップとリダイレクトを常に許可する</strong>」を選択</li>
+                <li>「<strong>完了</strong>」をクリックしてページをリロード</li>
+            </ol>
+            <p class="popup-guide-note">※ Chromeの場合：アドレスバー右の <i class="fas fa-ban" style="color:#dc2626;font-size:0.8em;"></i> → サイトの設定 → ポップアップとリダイレクト → 許可</p>
+        </div>
+
+        <div class="permission-btn-row">
+            <button id="permissionStartBtn" class="permission-start-btn">
+                <i class="fas fa-check-circle"></i>
+                確認しました
+            </button>
+            <button id="permissionCloseBtn" class="permission-close-btn" style="display:none">
+                閉じる
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 通話申請受信モーダル ========== -->
+<div id="incomingCallModal" class="modal">
+    <div class="modal-content incoming-call-content">
+        <div class="incoming-call-icon">
+            <i class="fas fa-phone-volume"></i>
+        </div>
+        <h2 class="incoming-call-title">着信</h2>
+        <p class="incoming-call-from"><span id="incomingCallerName"></span> から通話申請が届いています</p>
+        <div class="incoming-call-actions">
+            <button id="acceptCallBtn" class="accept-btn">
+                <i class="fas fa-phone"></i>
+                応答する
+            </button>
+            <button id="rejectCallBtn" class="reject-btn">
+                <i class="fas fa-phone-slash"></i>
+                拒否する
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== フレンドモーダル ========== -->
+<div id="friendModal" class="modal">
+    <div class="modal-content friend-modal-content">
+        <div class="friend-modal-header">
+            <h2><i class="fas fa-user-friends"></i> フレンド</h2>
+            <button class="friend-modal-close icon-button"><i class="fas fa-times"></i></button>
+        </div>
+        <!-- タブ -->
+        <div class="friend-tabs">
+            <button class="friend-tab active" data-ftab="friends">フレンド</button>
+            <button class="friend-tab" data-ftab="requests">申請中
+                <span class="tab-badge" id="requestTabBadge" style="display:none"></span>
+            </button>
+            <button class="friend-tab" data-ftab="add">追加</button>
+            <button class="friend-tab" data-ftab="block">ブロック</button>
+        </div>
+        <!-- フレンドリスト -->
+        <div id="friendListPanel" class="friend-panel">
+            <div id="friendList" class="friend-list-inner">
+                <div class="friend-empty"><i class="fas fa-user-slash"></i><p>フレンドがいません</p></div>
+            </div>
+        </div>
+        <!-- 申請中パネル -->
+        <div id="requestsPanel" class="friend-panel" style="display:none">
+            <p class="friend-section-label"><i class="fas fa-arrow-down"></i> 受信した申請</p>
+            <div id="incomingRequests" class="friend-list-inner">
+                <div class="friend-empty"><i class="fas fa-inbox"></i><p>受信した申請はありません</p></div>
+            </div>
+            <p class="friend-section-label" style="margin-top:1rem"><i class="fas fa-arrow-up"></i> 送信した申請</p>
+            <div id="outgoingRequests" class="friend-list-inner">
+                <div class="friend-empty"><i class="fas fa-paper-plane"></i><p>送信した申請はありません</p></div>
+            </div>
+        </div>
+        <!-- フレンド追加パネル -->
+        <div id="addFriendPanel" class="friend-panel" style="display:none">
+            <p class="friend-add-desc">相手の本名を入力してフレンド申請を送ります。</p>
+            <div class="friend-add-row">
+                <input type="text" id="friendSearchInput" placeholder="本名を入力" maxlength="20">
+                <button id="sendFriendRequestBtn" class="friend-add-btn">
+                    <i class="fas fa-user-plus"></i> 申請を送る
+                </button>
+            </div>
+            <p class="auth-error" id="friendAddError"></p>
+        </div>
+        <!-- ブロックパネル -->
+        <div id="blockPanel" class="friend-panel" style="display:none">
+            <p class="friend-add-desc">ブロックすると通話申請・メッセージを受け取りません。</p>
+            <div class="friend-add-row">
+                <input type="text" id="blockSearchInput" placeholder="ブロックする本名を入力" maxlength="20">
+                <button id="addBlockBtn" class="friend-add-btn" style="background:var(--danger-color)">
+                    <i class="fas fa-ban"></i> ブロック
+                </button>
+            </div>
+            <p class="auth-error" id="blockError"></p>
+            <div id="blockList" class="friend-list-inner" style="margin-top:1rem">
+                <div class="friend-empty"><i class="fas fa-check-circle"></i><p>ブロック中のユーザーはいません</p></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 設定モーダル ========== -->
+<div id="settingsModal" class="modal">
+    <div class="modal-content settings-modal-content">
+        <div class="settings-modal-header">
+            <h2><i class="fas fa-cog"></i> 設定</h2>
+            <button class="settings-modal-close icon-button"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="settings-body">
+            <div class="settings-item">
+                <div class="settings-item-info">
+                    <span class="settings-item-title">自動ログイン</span>
+                    <span class="settings-item-desc">次回起動時に自動でログインします</span>
+                </div>
+                <label class="toggle-switch">
+                    <input type="checkbox" id="settingsAutoLogin">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <!-- 区切り -->
+            <div class="settings-section-label">アカウント</div>
+
+            <!-- プロフィール画像 -->
+            <div class="settings-item settings-item-col">
+                <div class="settings-item-info">
+                    <span class="settings-item-title"><i class="fas fa-image"></i> プロフィール画像</span>
+                    <span class="settings-item-desc">あなたのアイコンとして表示されます（自動で256pxに縮小）</span>
+                </div>
+                <div class="avatar-edit-row">
+                    <div id="avatarPreview" class="avatar-preview">
+                        <span id="avatarPreviewInitial">?</span>
+                    </div>
+                    <div class="avatar-edit-buttons">
+                        <label class="settings-action-btn avatar-upload-btn">
+                            <i class="fas fa-upload"></i> 画像を選択
+                            <input type="file" id="avatarFileInput" accept="image/*" style="display:none">
+                        </label>
+                        <button id="avatarRemoveBtn" class="settings-action-btn" style="background:var(--text-secondary)">
+                            <i class="fas fa-trash"></i> 削除
+                        </button>
+                    </div>
+                </div>
+                <p class="settings-error" id="avatarError"></p>
+            </div>
+
+            <!-- 名前変更 -->
+            <div class="settings-item settings-item-col">
+                <div class="settings-item-info">
+                    <span class="settings-item-title"><i class="fas fa-user"></i> 本名を変更</span>
+                </div>
+                <div class="settings-input-group">
+                    <input type="text" id="settingsNewName" placeholder="新しい本名（20文字以内）" maxlength="20" autocomplete="off">
+                    <input type="password" id="settingsNameCurrentPw" placeholder="現在のパスワードで確認" autocomplete="current-password">
+                    <button id="settingsChangeNameBtn" class="settings-action-btn">
+                        <i class="fas fa-check"></i> 変更する
+                    </button>
+                </div>
+                <p class="settings-error" id="settingsNameError"></p>
+            </div>
+
+            <!-- パスワード変更 -->
+            <div class="settings-item settings-item-col">
+                <div class="settings-item-info">
+                    <span class="settings-item-title"><i class="fas fa-lock"></i> パスワードを変更</span>
+                </div>
+                <div class="settings-input-group">
+                    <input type="password" id="settingsCurrentPw" placeholder="現在のパスワード" autocomplete="current-password">
+                    <input type="password" id="settingsNewPw" placeholder="新しいパスワード（英数字4文字以上）" autocomplete="new-password">
+                    <input type="password" id="settingsNewPwConfirm" placeholder="新しいパスワード（確認）" autocomplete="new-password">
+                    <button id="settingsChangePwBtn" class="settings-action-btn">
+                        <i class="fas fa-check"></i> 変更する
+                    </button>
+                </div>
+                <p class="settings-error" id="settingsPwError"></p>
+            </div>
+
+            <!-- 管理者専用セクション（"管理者" でログイン時のみ表示） -->
+            <div id="settingsAdminSection" style="display:none">
+                <div class="settings-section-label" style="color:#dc2626">
+                    <i class="fas fa-shield-halved"></i> 管理者ツール
+                </div>
+                <div class="settings-item settings-item-col">
+                    <div class="settings-item-info">
+                        <span class="settings-item-title"><i class="fas fa-bullhorn"></i> 全ユーザーに一斉DM</span>
+                        <span class="settings-item-desc">「管理者からのお知らせ」として全ての登録ユーザーに送信されます。</span>
+                    </div>
+                    <div class="settings-input-group">
+                        <textarea id="adminBroadcastText" placeholder="お知らせ内容を入力（500文字以内）" maxlength="500" rows="3" style="resize:vertical;font-family:inherit;padding:0.6rem 0.8rem;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-color);color:var(--text-color)"></textarea>
+                        <button id="adminBroadcastBtn" class="settings-action-btn" style="background:linear-gradient(135deg,#dc2626,#f97316);color:#fff;border:none">
+                            <i class="fas fa-paper-plane"></i> 全員に送信
+                        </button>
+                    </div>
+                    <p class="settings-error" id="adminBroadcastError"></p>
+                </div>
+            </div>
+        </div>
+        <div class="settings-footer">
+            <button id="settingsSaveBtn" class="auth-submit-btn" style="margin-top:0">
+                <i class="fas fa-check"></i> 保存する
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== フレンド申請受信モーダル ========== -->
+<div id="incomingFriendRequestModal" class="modal">
+    <div class="modal-content incoming-call-content">
+        <div class="incoming-call-icon" style="background: linear-gradient(135deg,#16a34a,#22c55e)">
+            <i class="fas fa-user-plus"></i>
+        </div>
+        <h2 class="incoming-call-title">フレンド申請</h2>
+        <p class="incoming-call-from"><span id="friendRequestFromName"></span> からフレンド申請が届いています</p>
+        <div class="incoming-call-actions">
+            <button id="acceptFriendRequestBtn" class="accept-btn">
+                <i class="fas fa-check"></i> 承認する
+            </button>
+            <button id="rejectFriendRequestBtn" class="reject-btn">
+                <i class="fas fa-times"></i> 拒否する
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 通知モーダル ========== -->
+<div id="notificationModal" class="modal">
+    <div class="modal-content">
+        <i class="modal-icon"></i>
+        <p class="modal-message"></p>
+        <button class="modal-close">OK</button>
+    </div>
+</div>
+
+<!-- ========== 通話申請中モーダル ========== -->
+<div id="callingModal" class="modal">
+    <div class="modal-content calling-content">
+        <div class="calling-animation">
+            <div class="calling-ring"></div>
+            <div class="calling-ring"></div>
+            <div class="calling-icon-wrap">
+                <i class="fas fa-phone"></i>
+            </div>
+        </div>
+        <p class="calling-to">呼び出し中...</p>
+        <p class="calling-name" id="callingTargetName"></p>
+        <button id="cancelCallBtn" class="cancel-call-btn">
+            <i class="fas fa-phone-slash"></i>
+            キャンセル
+        </button>
+    </div>
+</div>
+
+<!-- ========== DMチャットモーダル ========== -->
+<div id="dmModal" class="modal">
+    <div class="modal-content chat-modal-content">
+        <div class="chat-modal-header">
+            <div class="chat-modal-title">
+                <i class="fas fa-comment-dots"></i>
+                <span id="dmModalTitle">ダイレクトメッセージ</span>
+            </div>
+            <div class="chat-modal-header-right">
+                <button id="dmCallBtn" class="icon-button" title="通話" style="display:none">
+                    <i class="fas fa-phone"></i>
+                </button>
+                <button class="dm-modal-close icon-button"><i class="fas fa-times"></i></button>
+            </div>
+        </div>
+        <!-- DM 宛先リスト（会話一覧） -->
+        <div id="dmConversationList" class="dm-conversation-list">
+            <div class="friend-empty"><i class="fas fa-comment-slash"></i><p>会話がありません</p></div>
+        </div>
+        <!-- 新規DM開始ボタン（FAB） -->
+        <button id="newDmFab" class="new-dm-fab" title="新規DM"><i class="fas fa-plus"></i></button>
+        <!-- DM チャット本文 -->
+        <div id="dmChatArea" class="chat-area" style="display:none">
+            <button id="dmBackBtn" class="dm-back-btn"><i class="fas fa-arrow-left"></i> 戻る</button>
+            <div id="dmMessages" class="chat-messages"></div>
+            <div class="chat-input-area">
+                <label class="file-attach-btn" title="ファイル添付">
+                    <i class="fas fa-paperclip"></i>
+                    <input type="file" id="dmFileInput" style="display:none" accept="image/*,video/*,audio/*,.pdf,.txt,.zip">
+                </label>
+                <input type="text" id="dmInput" placeholder="メッセージを入力..." maxlength="2000">
+                <button id="dmSendBtn" class="send-btn"><i class="fas fa-paper-plane"></i></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== グループチャットモーダル ========== -->
+<div id="groupModal" class="modal">
+    <div class="modal-content chat-modal-content">
+        <div class="chat-modal-header">
+            <div class="chat-modal-title">
+                <i class="fas fa-comments"></i>
+                <span id="groupModalTitle">グループチャット</span>
+            </div>
+            <div class="chat-modal-header-right">
+                <button id="createGroupBtn" class="friend-add-btn" style="padding:0.4rem 0.8rem;font-size:0.8rem">
+                    <i class="fas fa-plus"></i> 新規
+                </button>
+                <button class="group-modal-close icon-button"><i class="fas fa-times"></i></button>
+            </div>
+        </div>
+        <!-- グループ一覧 -->
+        <div id="groupListArea" class="dm-conversation-list">
+            <div class="friend-empty"><i class="fas fa-door-open"></i><p>参加中のグループはありません</p></div>
+        </div>
+        <!-- グループ内チャット -->
+        <div id="groupChatArea" class="chat-area" style="display:none">
+            <div class="group-chat-topbar">
+                <button id="groupBackBtn" class="dm-back-btn"><i class="fas fa-arrow-left"></i> 戻る</button>
+                <span id="groupChatName" class="group-chat-name"></span>
+                <div class="group-chat-actions">
+                    <button id="groupSettingsBtn" class="icon-button" title="グループ設定"><i class="fas fa-cog"></i></button>
+                    <button id="inviteGroupBtn" class="icon-button" title="招待"><i class="fas fa-user-plus"></i></button>
+                    <button id="leaveGroupBtn" class="icon-button leave-btn" title="退出"><i class="fas fa-door-open"></i></button>
+                </div>
+            </div>
+            <div id="groupMessages" class="chat-messages"></div>
+            <div class="chat-input-area">
+                <label class="file-attach-btn" title="ファイル添付">
+                    <i class="fas fa-paperclip"></i>
+                    <input type="file" id="groupFileInput" style="display:none" accept="image/*,video/*,audio/*,.pdf,.txt,.zip">
+                </label>
+                <input type="text" id="groupInput" placeholder="メッセージを入力..." maxlength="2000">
+                <button id="groupSendBtn" class="send-btn"><i class="fas fa-paper-plane"></i></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== グループ作成モーダル ========== -->
+<div id="createGroupModal" class="modal">
+    <div class="modal-content" style="max-width:400px">
+        <h2 style="margin-bottom:1rem"><i class="fas fa-plus-circle"></i> グループ作成</h2>
+        <!-- グループ画像 -->
+        <div class="group-avatar-edit-row">
+            <div id="newGroupAvatarPreview" class="group-avatar-preview">
+                <i class="fas fa-users"></i>
+            </div>
+            <div class="avatar-edit-buttons">
+                <label class="settings-action-btn avatar-upload-btn">
+                    <i class="fas fa-image"></i> 画像を選択
+                    <input type="file" id="newGroupAvatarInput" accept="image/*" style="display:none">
+                </label>
+                <button id="newGroupAvatarRemoveBtn" class="settings-action-btn" style="background:var(--text-secondary)">
+                    <i class="fas fa-times"></i> クリア
+                </button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label>グループ名</label>
+            <input type="text" id="newGroupName" placeholder="グループ名（20文字以内）" maxlength="20">
+        </div>
+        <p class="auth-error" id="createGroupError"></p>
+        <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <button id="createGroupConfirmBtn" class="auth-submit-btn" style="flex:1">
+                <i class="fas fa-check"></i> 作成
+            </button>
+            <button id="createGroupCancelBtn" class="auth-submit-btn" style="flex:1;background:var(--text-secondary)">
+                キャンセル
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== グループ設定モーダル ========== -->
+<div id="groupSettingsModal" class="modal">
+    <div class="modal-content" style="max-width:420px">
+        <div class="settings-modal-header">
+            <h2><i class="fas fa-cog"></i> グループ設定</h2>
+            <button id="groupSettingsCloseBtn" class="icon-button"><i class="fas fa-times"></i></button>
+        </div>
+        <div style="padding:1rem 0">
+            <p id="groupSettingsHint" style="color:var(--text-secondary);font-size:0.85rem;margin:0 0 1rem">グループのオーナーのみ画像と名前を変更できます。</p>
+            <!-- グループ画像 -->
+            <div class="settings-item-info">
+                <span class="settings-item-title"><i class="fas fa-image"></i> グループ画像</span>
+            </div>
+            <div class="group-avatar-edit-row">
+                <div id="groupSettingsAvatarPreview" class="group-avatar-preview">
+                    <i class="fas fa-users"></i>
+                </div>
+                <div class="avatar-edit-buttons">
+                    <label class="settings-action-btn avatar-upload-btn" id="groupSettingsAvatarUploadLabel">
+                        <i class="fas fa-upload"></i> 画像を選択
+                        <input type="file" id="groupSettingsAvatarInput" accept="image/*" style="display:none">
+                    </label>
+                    <button id="groupSettingsAvatarRemoveBtn" class="settings-action-btn" style="background:var(--text-secondary)">
+                        <i class="fas fa-trash"></i> 削除
+                    </button>
+                </div>
+            </div>
+            <!-- グループ名 -->
+            <div class="settings-item-info" style="margin-top:1rem">
+                <span class="settings-item-title"><i class="fas fa-tag"></i> グループ名</span>
+            </div>
+            <div class="settings-input-group">
+                <input type="text" id="groupSettingsName" placeholder="グループ名（20文字以内）" maxlength="20">
+            </div>
+            <p class="settings-error" id="groupSettingsError"></p>
+            <div style="display:flex;gap:0.5rem;margin-top:1rem">
+                <button id="groupSettingsSaveBtn" class="auth-submit-btn" style="flex:1">
+                    <i class="fas fa-check"></i> 保存する
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== グループ招待モーダル ========== -->
+<div id="inviteGroupModal" class="modal">
+    <div class="modal-content" style="max-width:400px">
+        <h2 style="margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#0ea5e9,#06b6d4 50%,#10b981);color:#fff;box-shadow:0 4px 12px rgba(6,182,212,0.3)">
+                <i class="fas fa-paper-plane" style="font-size:0.95rem"></i>
+            </span>
+            メンバーを招待
+        </h2>
+        <div class="form-group">
+            <label>招待する本名</label>
+            <input type="text" id="inviteTargetName" placeholder="本名を入力" maxlength="20">
+        </div>
+        <p class="auth-error" id="inviteGroupError"></p>
+        <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <button id="inviteGroupConfirmBtn" class="auth-submit-btn" style="flex:1">
+                <i class="fas fa-paper-plane"></i> 招待
+            </button>
+            <button id="inviteGroupCancelBtn" class="auth-submit-btn" style="flex:1;background:var(--text-secondary)">
+                キャンセル
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== グループ招待受信モーダル ========== -->
+<div id="incomingGroupInviteModal" class="modal">
+    <div class="modal-content incoming-call-content">
+        <div class="incoming-call-icon" style="background:linear-gradient(135deg,#0ea5e9,#06b6d4 50%,#10b981);box-shadow:0 8px 24px rgba(6,182,212,0.35)">
+            <i class="fas fa-door-open"></i>
+        </div>
+        <h2 class="incoming-call-title">グループ招待</h2>
+        <p class="incoming-call-from"><span id="groupInviteFrom"></span> から <strong id="groupInviteName"></strong> への招待が届いています</p>
+        <div class="incoming-call-actions">
+            <button id="acceptGroupInviteBtn" class="accept-btn">
+                <i class="fas fa-check"></i> 参加する
+            </button>
+            <button id="rejectGroupInviteBtn" class="reject-btn">
+                <i class="fas fa-times"></i> 断る
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 新規DM入力モーダル ========== -->
+<div id="newDmModal" class="modal">
+    <div class="modal-content" style="max-width:400px">
+        <h2 style="margin-top:0;display:flex;align-items:center;gap:0.5rem">
+            <i class="fas fa-comment-medical" style="color:var(--primary-color)"></i> 新規DM
+        </h2>
+        <p style="color:var(--text-secondary);margin:0.5rem 0 1rem">相手のユーザー名を入力してください</p>
+        <input type="text" id="newDmTargetName" placeholder="ユーザー名" maxlength="40" style="width:100%;padding:0.75rem;border:1px solid var(--border-color);border-radius:8px;font-size:1rem;box-sizing:border-box">
+        <p id="newDmError" style="color:var(--danger-color);font-size:0.85rem;margin:0.5rem 0;min-height:1.2em"></p>
+        <div style="display:flex;gap:0.75rem;margin-top:1rem">
+            <button id="newDmCancelBtn" class="reject-btn" style="flex:1">キャンセル</button>
+            <button id="newDmConfirmBtn" class="accept-btn" style="flex:1">
+                <i class="fas fa-comment"></i> 開始
+            </button>
+        </div>
+    </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
