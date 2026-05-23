@@ -1243,7 +1243,15 @@ class SecureVideoChat {
     }
 
     setupMainEvents() {
-        this.el.logoutBtn.addEventListener('click', () => this.doLogout());
+        this.el.logoutBtn.addEventListener('click', () => {
+            // 自動ログインが有効な状態で初めてログアウトする場合のみ警告
+            if (this.autoLoginEnabled && localStorage.getItem('svc_logout_warned') !== '1') {
+                const ok = confirm('ここでログアウトをすると、自動ログインが作動しなくなります。よろしいですか？');
+                if (!ok) return;
+                localStorage.setItem('svc_logout_warned', '1');
+            }
+            this.doLogout();
+        });
 
         this.el.securityToggleBtn.addEventListener('click', () => {
             this.el.securityPanel.classList.toggle('collapsed');
@@ -1614,6 +1622,7 @@ class SecureVideoChat {
         try {
             const res = await FbAPI.onlineList(this.token);
             if (res.ok) {
+                this._lastOnlineUsers = res.users || [];
                 this.renderUserList(res.users);
             } else if (res.error === 'セッションが無効です') {
                 this.doLogout();
@@ -1623,6 +1632,13 @@ class SecureVideoChat {
         }
 
         icon.classList.remove('fa-spin');
+    }
+
+    // フレンドリストが変わったとき、現在のオンラインリストを再描画する
+    _rerenderOnlineListIfPossible() {
+        if (this._lastOnlineUsers && Array.isArray(this._lastOnlineUsers)) {
+            this.renderUserList(this._lastOnlineUsers);
+        }
     }
 
     renderUserList(users) {
@@ -1638,26 +1654,54 @@ class SecureVideoChat {
             return;
         }
 
-        users.forEach(user => {
+        // フレンドを上に、非フレンドを下に並び替え（それぞれの中は名前順）
+        const sortedUsers = [...users].sort((a, b) => {
+            const aIsFriend = this.friendNames.has(a.name) ? 1 : 0;
+            const bIsFriend = this.friendNames.has(b.name) ? 1 : 0;
+            if (aIsFriend !== bIsFriend) return bIsFriend - aIsFriend; // フレンドが先
+            return a.name.localeCompare(b.name, 'ja');
+        });
+
+        sortedUsers.forEach(user => {
+            const isFriend = this.friendNames.has(user.name);
             const item = document.createElement('div');
-            item.className = 'user-item';
+            item.className = 'user-item' + (isFriend ? ' is-friend' : '');
             item.dataset.name = user.name;
             item.dataset.peerId = user.peer_id;
             const avUrl = this.avatarCache[user.name];
             const avClass = avUrl ? 'user-avatar has-image' : 'user-avatar';
             const avStyle = avUrl ? `background-image:url('${avUrl}')` : '';
             const initial = avUrl ? '' : user.name.charAt(0).toUpperCase();
+            // フレンドアイコン（小さなハート） + 通話ボタンはフレンドのみ
+            const friendMark = isFriend
+                ? `<span class="user-friend-mark" title="フレンド"><i class="fas fa-user-check"></i></span>`
+                : '';
+            const callBtnHtml = isFriend
+                ? `<button class="call-user-btn" data-action="call" title="通話"><i class="fas fa-phone"></i></button>`
+                : '';
             item.innerHTML = `
                 <div class="user-item-info">
                     <div class="${avClass}" data-uname="${this.escapeHtml(user.name)}" style="${avStyle}">${initial}</div>
                     <span class="user-item-name">${this.escapeHtml(user.name)}</span>
+                    ${friendMark}
                     <span class="user-online-dot"></span>
-                </div>`;
+                </div>
+                ${callBtnHtml}`;
+            // フレンドの場合のみ通話ボタンにクリックハンドラ
+            if (isFriend) {
+                const btn = item.querySelector('.call-user-btn');
+                if (btn) {
+                    btn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.startOutgoingCall(user.name, user.peer_id);
+                    });
+                }
+            }
             list.appendChild(item);
         });
 
         // まだキャッシュにないユーザーのアバターをバックグラウンドで取得
-        this._fetchAvatarsFor(users.map(u => u.name)).then(() => this._refreshAvatarsInDom());
+        this._fetchAvatarsFor(sortedUsers.map(u => u.name)).then(() => this._refreshAvatarsInDom());
     }
 
     escapeHtml(str) {
@@ -1672,6 +1716,7 @@ class SecureVideoChat {
         try {
             const res = await FbAPI.getFriends(this.token);
             if (!res.ok) return;
+            const prevFriends = this.friendNames ? new Set(this.friendNames) : new Set();
             this.friendNames = new Set([
                 ...(res.friends || []),
                 ...(res.incoming || []).map(r => r.from),
@@ -1679,6 +1724,10 @@ class SecureVideoChat {
             const incomingCount = (res.incoming || []).length;
             this._updateFriendBadge(incomingCount);
             this._cachedFriendData = res;
+            // フレンドセットに変更があればオンラインリストの並び・通話ボタン表示を更新
+            const changed = prevFriends.size !== this.friendNames.size ||
+                [...this.friendNames].some(n => !prevFriends.has(n));
+            if (changed) this._rerenderOnlineListIfPossible();
         } catch (e) {
             console.warn('フレンドリスト取得失敗:', e);
         }
@@ -2315,6 +2364,7 @@ class SecureVideoChat {
                 this.showNotification('フレンド', `${signal.from} がフレンド申請を承認しました`, 'success');
                 await this.refreshFriendList();
                 if (this.el.friendModal?.classList.contains('visible')) this._renderFriendModal();
+                this._rerenderOnlineListIfPossible();
                 break;
 
             case 'friend_reject':
@@ -2352,6 +2402,15 @@ class SecureVideoChat {
                 try {
                     const leftData = JSON.parse(decodeURIComponent(signal.signal_data));
                     this._handleMemberLeft(leftData.groupId, signal.from);
+                } catch (_) { }
+                break;
+
+            case 'read_receipt':
+                // 既読通知: { convType: 'dm' | 'group', convKey, msgIds: [...] }
+                if (this.blockedUsers.has(signal.from)) break;
+                try {
+                    const rr = JSON.parse(decodeURIComponent(signal.signal_data));
+                    this._applyReadReceipt(signal.from, rr);
                 } catch (_) { }
                 break;
         }
@@ -2656,14 +2715,21 @@ class SecureVideoChat {
         this.showUserListSection(true);
 
         if (this.audioContext) {
-            this.audioContext.close();
+            try { this.audioContext.close(); } catch (_) { }
             this.audioContext = null;
             this.gainNode = null;
+            this.preGainNode = null;
+            this.compressorNode = null;
+            this.makeUpGainNode = null;
+            this.audioSource = null;
         }
         this.el.remoteVideo.muted = false;
         this.isVolumeControlVisible = false;
         if (this.el.volumeSliderContainer) this.el.volumeSliderContainer.classList.remove('visible');
+        // 音量を100%にリセットし、スライダーとUI（バー色・BOOSTバッジ・数値）も完全リセット
+        this.currentVolume = 100;
         if (this.el.volumeSlider) this.el.volumeSlider.value = 100;
+        this._refreshVolumeUI(100);
         this.updateStatus('オンライン');
 
         this.disconnectedBySelf = false;
@@ -2763,6 +2829,99 @@ class SecureVideoChat {
         this.lastReadTs[convKey] = Date.now();
         this._saveLastReadTs();
     }
+
+    // =====================================================
+    // 既読機能
+    // =====================================================
+    // 自分が「未読のうち相手から来たメッセージ」を読んだことを送信側に通知する
+    // - DM: 相手1人に read_receipt を送信
+    // - グループ: 自分以外のメンバー全員に read_receipt を送信
+    _sendReadReceiptForConv(convKey) {
+        if (!convKey) return;
+        const msgs = this.localChatDB[convKey] || [];
+        if (msgs.length === 0) return;
+        // 「相手送信のメッセージ」のうち、まだ自分のreadByに含まれていないものを集める
+        // （= 既読通知をまだ送っていないもの）
+        const targetMsgIds = [];
+        for (const m of msgs) {
+            if (!m || !m.msgId) continue;
+            if (m.type === 'system' || m.type === 'admin_broadcast') continue;
+            if (m.from === this.myName) continue;
+            if (!Array.isArray(m.readBy)) m.readBy = [];
+            if (!m.readBy.includes(this.myName)) {
+                m.readBy.push(this.myName);
+                targetMsgIds.push(m.msgId);
+            }
+        }
+        if (targetMsgIds.length === 0) return;
+        this._saveLocalChatDB();
+
+        if (convKey.startsWith('dm:')) {
+            // 相手だけに送信
+            const parts = convKey.slice(3).split('|');
+            const partner = parts.find(p => p !== this.myName);
+            if (!partner) return;
+            const payload = { convType: 'dm', convKey, msgIds: targetMsgIds };
+            FbAPI.sendSignal(this.token, partner, 'read_receipt', encodeURIComponent(JSON.stringify(payload))).catch(() => { });
+        } else if (convKey.startsWith('grp:')) {
+            const gid = convKey.slice(4);
+            const group = this.myGroups.find(g => g.id === gid);
+            if (!group?.members) return;
+            const payload = { convType: 'group', convKey, msgIds: targetMsgIds, groupId: gid };
+            for (const m of group.members) {
+                if (m === this.myName) continue;
+                FbAPI.sendSignal(this.token, m, 'read_receipt', encodeURIComponent(JSON.stringify(payload))).catch(() => { });
+            }
+        }
+    }
+
+    // 他者からの既読通知を受け取って、自分のメッセージの readBy に追加する
+    _applyReadReceipt(fromName, payload) {
+        if (!payload || !payload.convKey || !Array.isArray(payload.msgIds)) return;
+        const convKey = payload.convKey;
+        // 安全のため: DMの場合、convKeyに自分の名前が含まれるかチェック
+        if (convKey.startsWith('dm:')) {
+            const parts = convKey.slice(3).split('|');
+            if (!parts.includes(this.myName) || !parts.includes(fromName)) return;
+        } else if (convKey.startsWith('grp:')) {
+            // グループの場合、自分が所属しているか
+            const gid = convKey.slice(4);
+            if (!this.myGroups.some(g => g.id === gid)) return;
+        } else {
+            return;
+        }
+        const msgs = this.localChatDB[convKey];
+        if (!msgs) return;
+        const msgIdSet = new Set(payload.msgIds);
+        let changed = false;
+        for (const m of msgs) {
+            if (!m || !m.msgId) continue;
+            if (!msgIdSet.has(m.msgId)) continue;
+            if (m.from !== this.myName) continue; // 自分が送ったメッセージにだけ既読を付ける
+            if (!Array.isArray(m.readBy)) m.readBy = [];
+            if (!m.readBy.includes(fromName)) {
+                m.readBy.push(fromName);
+                changed = true;
+            }
+        }
+        if (changed) {
+            this._saveLocalChatDB();
+            // 表示中のチャットなら即時再描画
+            if (convKey.startsWith('dm:')) {
+                const parts = convKey.slice(3).split('|');
+                const partner = parts.find(p => p !== this.myName);
+                if (this.el.dmModal?.classList.contains('visible') && this.dmPartner === partner) {
+                    this._renderDmMessages(partner);
+                }
+            } else if (convKey.startsWith('grp:')) {
+                const gid = convKey.slice(4);
+                if (this.el.groupModal?.classList.contains('visible') && this.currentGroupId === gid) {
+                    this._renderGroupMessages(gid);
+                }
+            }
+        }
+    }
+
     // 指定会話の未読数を localChatDB から算出（自分以外＆システムメッセージ以外＆最終既読より新しい）
     _countUnread(convKey) {
         const msgs = this.localChatDB[convKey] || [];
@@ -2861,8 +3020,25 @@ class SecureVideoChat {
             this.el.dmConversationList.innerHTML = '<div class="friend-empty"><i class="fas fa-comment-slash"></i><p>会話がありません</p><p style="font-size:0.85rem;opacity:0.7;margin-top:0.5rem">右下の＋ボタンから新規DMを開始できます</p></div>';
             return;
         }
+
+        // 各DMの最終メッセージ時刻を計算して、新しい順にソート
+        // メッセージが0件の相手（フレンドだけど未会話）は最後
+        const namesArr = [...allNames];
+        const lastTsByName = {};
+        namesArr.forEach(name => {
+            const msgs = this.localChatDB[this._dmKey(name)] || [];
+            const last = msgs[msgs.length - 1];
+            lastTsByName[name] = last?.ts || 0;
+        });
+        namesArr.sort((a, b) => {
+            const ta = lastTsByName[a];
+            const tb = lastTsByName[b];
+            if (ta === tb) return a.localeCompare(b, 'ja');
+            return tb - ta; // 新しいものが上
+        });
+
         let html = '';
-        allNames.forEach(name => {
+        namesArr.forEach(name => {
             const key = this._dmKey(name);
             const msgs = this.localChatDB[key] || [];
             const last = msgs[msgs.length - 1];
@@ -2894,12 +3070,15 @@ class SecureVideoChat {
         });
 
         // 未取得のアバターをバックグラウンドで取得
-        const targets = [...allNames].filter(n => n !== '管理者');
+        const targets = namesArr.filter(n => n !== '管理者');
         this._fetchAvatarsFor(targets).then(() => this._refreshAvatarsInDom());
     }
     _openDmChat(name) {
         this.dmPartner = name;
-        this._markAsRead(this._dmKey(name));
+        const key = this._dmKey(name);
+        this._markAsRead(key);
+        // 既読通知を送信（まだ送っていない受信メッセージに対して）
+        this._sendReadReceiptForConv(key);
         this._recomputeAllUnreadBadges();
         this.el.dmConversationList.style.display = 'none';
         this.el.dmChatArea.style.display = '';
@@ -2915,7 +3094,8 @@ class SecureVideoChat {
         const msgs = this.localChatDB[key] || [];
         // メッセージから他者のFrom名を集めて先にアバター取得
         const otherNames = [...new Set(msgs.filter(m => m.from && m.from !== this.myName && m.type !== 'system').map(m => m.from))];
-        this.el.dmMessages.innerHTML = msgs.map(m => this._renderMessageBubble(m)).join('');
+        const ctx = { type: 'dm', partner: name };
+        this.el.dmMessages.innerHTML = msgs.map(m => this._renderMessageBubble(m, ctx)).join('');
         this.el.dmMessages.scrollTop = this.el.dmMessages.scrollHeight;
         // 取得して反映
         if (otherNames.length > 0) {
@@ -2962,6 +3142,8 @@ class SecureVideoChat {
         if (this.el.dmModal.classList.contains('visible') && this.dmPartner === fromName) {
             // この会話を開いている → 既読扱い
             this._markAsRead(key);
+            // 既読通知を相手に送信
+            this._sendReadReceiptForConv(key);
             this._renderDmMessages(fromName);
             this._recomputeAllUnreadBadges();
         } else {
@@ -3018,7 +3200,19 @@ class SecureVideoChat {
             this.el.groupListArea.innerHTML = '<div class="friend-empty"><i class="fas fa-door-open"></i><p>参加中のグループはありません</p></div>';
             return;
         }
-        this.el.groupListArea.innerHTML = this.myGroups.map(g => {
+
+        // 各グループの最終メッセージ時刻でソート（新しい順）
+        const sortedGroups = [...this.myGroups].sort((a, b) => {
+            const msgsA = this.localChatDB[this._groupKey(a.id)] || [];
+            const msgsB = this.localChatDB[this._groupKey(b.id)] || [];
+            // システムメッセージも順序判定に使う（参加直後のフィードバックが上に来るように）
+            const ta = msgsA.length ? (msgsA[msgsA.length - 1].ts || 0) : 0;
+            const tb = msgsB.length ? (msgsB[msgsB.length - 1].ts || 0) : 0;
+            if (ta === tb) return (a.name || '').localeCompare(b.name || '', 'ja');
+            return tb - ta;
+        });
+
+        this.el.groupListArea.innerHTML = sortedGroups.map(g => {
             const unread = this.groupUnreadCounts[g.id] || 0;
             // グループアバター: キャッシュ or g.avatar
             const url = this.groupAvatarCache[g.id] || g.avatar;
@@ -3036,7 +3230,7 @@ class SecureVideoChat {
                 ${avatarHtml}
                 <div class="dm-conv-info">
                     <span class="dm-conv-name">${this.escapeHtml(g.name)}</span>
-                    <span class="dm-conv-preview">${g.members ? g.members.join(', ') : ''}</span>
+                    <span class="dm-conv-preview">${g.members ? this.escapeHtml(g.members.join(', ')) : ''}</span>
                 </div>
                 ${unread > 0 ? `<span class="dm-unread-badge">${unread}</span>` : ''}
             </div>`;
@@ -3048,7 +3242,9 @@ class SecureVideoChat {
     _openGroupChat(groupId, groupName) {
         this.currentGroupId = groupId;
         this.currentGroupName = groupName;
-        this._markAsRead(this._groupKey(groupId));
+        const key = this._groupKey(groupId);
+        this._markAsRead(key);
+        this._sendReadReceiptForConv(key);
         this._recomputeAllUnreadBadges();
         this.el.groupListArea.style.display = 'none';
         this.el.groupChatArea.style.display = '';
@@ -3060,7 +3256,10 @@ class SecureVideoChat {
         const key = this._groupKey(groupId);
         const msgs = this.localChatDB[key] || [];
         const otherNames = [...new Set(msgs.filter(m => m.from && m.from !== this.myName && m.type !== 'system').map(m => m.from))];
-        this.el.groupMessages.innerHTML = msgs.map(m => this._renderMessageBubble(m)).join('');
+        const group = this.myGroups.find(g => g.id === groupId);
+        const memberCount = group?.members ? group.members.length : 1;
+        const ctx = { type: 'group', groupId, memberCount };
+        this.el.groupMessages.innerHTML = msgs.map(m => this._renderMessageBubble(m, ctx)).join('');
         this.el.groupMessages.scrollTop = this.el.groupMessages.scrollHeight;
         if (otherNames.length > 0) {
             this._fetchAvatarsFor(otherNames).then(() => this._refreshAvatarsInDom());
@@ -3172,6 +3371,8 @@ class SecureVideoChat {
         if (this.el.groupModal.classList.contains('visible') && this.currentGroupId === groupId) {
             // このグループを開いている → 既読扱い
             this._markAsRead(key);
+            // 既読通知を全メンバーに送信
+            this._sendReadReceiptForConv(key);
             this._renderGroupMessages(groupId);
             this._recomputeAllUnreadBadges();
         } else {
@@ -3640,7 +3841,7 @@ class SecureVideoChat {
         if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
     }
 
-    _renderMessageBubble(msg) {
+    _renderMessageBubble(msg, ctx) {
         const isMine = msg.from === this.myName;
         const time = msg.ts ? new Date(msg.ts).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : '';
         if (msg.type === 'system') {
@@ -3683,12 +3884,32 @@ class SecureVideoChat {
                 this._fetchAvatarsFor([fromName]).then(() => this._refreshAvatarsInDom());
             }
         }
-        return `<div class="chat-msg ${isMine ? 'mine' : 'theirs'}">
+        // 自分が送ったメッセージにだけ既読表示
+        let readReceiptHtml = '';
+        if (isMine && ctx) {
+            const readBy = Array.isArray(msg.readBy) ? msg.readBy.filter(n => n !== this.myName) : [];
+            if (ctx.type === 'dm') {
+                // DM: 相手が読んでいたら「既読」
+                if (readBy.length > 0) {
+                    readReceiptHtml = `<div class="chat-msg-readreceipt">既読</div>`;
+                }
+            } else if (ctx.type === 'group') {
+                // グループ: 既読人数（自分以外のメンバー数を超えないようにクランプ）
+                const otherMembers = (ctx.memberCount || 1) - 1;
+                const seenCount = Math.min(readBy.length, Math.max(otherMembers, 0));
+                if (seenCount > 0) {
+                    readReceiptHtml = `<div class="chat-msg-readreceipt">既読 ${seenCount}</div>`;
+                }
+            }
+        }
+        const msgIdAttr = msg.msgId ? ` data-msgid="${this.escapeHtml(msg.msgId)}"` : '';
+        return `<div class="chat-msg ${isMine ? 'mine' : 'theirs'}"${msgIdAttr}>
             ${avatarHtml}
             <div class="chat-msg-body">
                 ${!isMine ? `<div class="chat-msg-name">${this.escapeHtml(msg.from || '')}</div>` : ''}
                 <div class="chat-msg-bubble">${contentHtml}</div>
                 <div class="chat-msg-time">${time}</div>
+                ${readReceiptHtml}
             </div>
         </div>`;
     }
@@ -3717,40 +3938,101 @@ class SecureVideoChat {
 
     setupAudioBoost(stream) {
         try {
-            if (this.audioContext) this.audioContext.close();
+            // 古いコンテキストが残っていれば閉じる
+            if (this.audioContext) {
+                try { this.audioContext.close(); } catch (_) { }
+            }
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             this.audioSource = this.audioContext.createMediaStreamSource(stream);
-            this.gainNode = this.audioContext.createGain();
-            this.audioSource.connect(this.gainNode);
-            this.gainNode.connect(this.audioContext.destination);
-            this.gainNode.gain.value = this.currentVolume / 100;
+
+            // === 多段増幅チェーン ===
+            // [source] → preGain → compressor → makeUpGain → destination
+            // preGain: 入力を素直に増幅（最大10倍程度まで可能）
+            // compressor: 大音量で歪まないように圧縮（聞こえやすさUP）
+            // makeUpGain: 圧縮後さらに底上げ
+            this.preGainNode = this.audioContext.createGain();
+            this.compressorNode = this.audioContext.createDynamicsCompressor();
+            // 強めの圧縮設定でラウドネス感を稼ぐ
+            this.compressorNode.threshold.value = -28; // dB（これを超えると圧縮）
+            this.compressorNode.knee.value = 18;       // dB（ソフトニー）
+            this.compressorNode.ratio.value = 6;       // 6:1 圧縮
+            this.compressorNode.attack.value = 0.003;  // 速いアタック
+            this.compressorNode.release.value = 0.15;  // やや早めのリリース
+            this.makeUpGainNode = this.audioContext.createGain();
+            this.makeUpGainNode.gain.value = 1.8;      // 圧縮後の補正ゲイン
+
+            // 後方互換: 既存コードが参照する gainNode は preGainNode を指す
+            this.gainNode = this.preGainNode;
+
+            this.audioSource.connect(this.preGainNode);
+            this.preGainNode.connect(this.compressorNode);
+            this.compressorNode.connect(this.makeUpGainNode);
+            this.makeUpGainNode.connect(this.audioContext.destination);
+
+            // currentVolumeに従ってpreGainNodeのgainを設定
+            this._applyVolumeGain(this.currentVolume);
+
             this.el.remoteVideo.muted = true;
+
+            // スライダーUIも現在値で再描画（前回の通話の値が引き継がれていてもバーが正しく見えるように）
+            if (this.el.volumeSlider) {
+                this.el.volumeSlider.value = this.currentVolume;
+            }
+            this._refreshVolumeUI(this.currentVolume);
         } catch (e) { console.warn('WebAudio初期化失敗:', e); }
+    }
+
+    // value(%) → preGainNode.gain.value を計算して反映
+    _applyVolumeGain(value) {
+        const v = parseInt(value) || 0;
+        // 0–100%: 通常のリニアゲイン（0.0 – 1.0）
+        // 100–600%: 100%地点を1.0として、最大で約7倍まで伸ばす（compressor後さらに×1.8で実効 約12.6倍）
+        let gain;
+        if (v <= 100) {
+            gain = v / 100;
+        } else {
+            // 100→1.0, 600→7.0 の線形
+            gain = 1 + ((v - 100) / 500) * 6;
+        }
+        if (this.preGainNode) {
+            this.preGainNode.gain.value = gain;
+        } else if (this.el.remoteVideo) {
+            this.el.remoteVideo.volume = Math.min(gain, 1);
+        }
     }
 
     updateVolume(value) {
         this.currentVolume = parseInt(value);
-        const gain = this.currentVolume / 100;
-        if (this.gainNode) this.gainNode.gain.value = gain;
-        else this.el.remoteVideo.volume = Math.min(gain, 1);
+        this._applyVolumeGain(this.currentVolume);
+        this._refreshVolumeUI(this.currentVolume);
+    }
 
+    // 音量UI（バーの色、アイコン、数値、BOOSTバッジ）を更新する
+    // currentVolume が変わったとき / setupAudioBoost で再表示するときに呼ぶ
+    _refreshVolumeUI(value) {
+        const v = parseInt(value);
+        if (!this.el.volumeControlButton) return;
         const icon = this.el.volumeControlButton.querySelector('i');
-        if (value == 0) icon.className = 'fas fa-volume-mute';
-        else if (value < 50) icon.className = 'fas fa-volume-down';
-        else icon.className = 'fas fa-volume-up';
-
-        const pct = (this.currentVolume / 300) * 100;
-        const overBoost = this.currentVolume > 100;
+        if (icon) {
+            if (v == 0) icon.className = 'fas fa-volume-mute';
+            else if (v < 50) icon.className = 'fas fa-volume-down';
+            else icon.className = 'fas fa-volume-up';
+        }
+        const MAX = 600;
+        const pct = (v / MAX) * 100;
+        const overBoost = v > 100;
+        const normalPct = (100 / MAX) * 100;
         let bg;
         if (!overBoost) {
             bg = `linear-gradient(to right, rgba(255,255,255,0.8) ${pct}%, rgba(255,255,255,0.2) ${pct}%)`;
         } else {
-            const normalPct = (100 / 300) * 100;
             bg = `linear-gradient(to right, rgba(255,255,255,0.8) ${normalPct}%, #f59e0b ${normalPct}%, #f59e0b ${pct}%, rgba(255,255,255,0.2) ${pct}%)`;
         }
-        this.el.volumeSlider.style.background = bg;
-        this.el.volumeSlider.classList.toggle('boosted', overBoost);
-        if (this.el.volumeValue) this.el.volumeValue.textContent = this.currentVolume;
+        if (this.el.volumeSlider) {
+            this.el.volumeSlider.style.background = bg;
+            this.el.volumeSlider.classList.toggle('boosted', overBoost);
+        }
+        if (this.el.volumeValue) this.el.volumeValue.textContent = v;
         if (this.el.boostBadge) this.el.boostBadge.classList.toggle('visible', overBoost);
     }
 
