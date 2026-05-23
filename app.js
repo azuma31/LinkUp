@@ -530,6 +530,30 @@ class FbAPI {
             }
         }
 
+        // accepted フレンド全員に「名前を変えた」ことを通知する name_changed シグナル
+        // 受信側はこの情報を使ってローカルDM履歴のキーを旧名から新名へマージできる
+        if (newName !== myName) {
+            try {
+                const acceptedPartners = new Set();
+                const frSnap2 = await this._db.ref('friends').get();
+                if (frSnap2.exists()) {
+                    const all = frSnap2.val();
+                    for (const k in all) {
+                        const v = all[k];
+                        if (!v || v.status !== 'accepted') continue;
+                        if (v.from === newName) acceptedPartners.add(v.to);
+                        else if (v.to === newName) acceptedPartners.add(v.from);
+                    }
+                }
+                const payload = encodeURIComponent(JSON.stringify({ oldName: myName, newName }));
+                for (const partner of acceptedPartners) {
+                    try {
+                        await this.sendSignal(token, partner, 'name_changed', payload);
+                    } catch (_) { }
+                }
+            } catch (_) { }
+        }
+
         return { ok: true, new_name: newName };
     }
 
@@ -2495,6 +2519,16 @@ class SecureVideoChat {
                     this._applyReadReceipt(signal.from, rr);
                 } catch (_) { }
                 break;
+
+            case 'name_changed':
+                // 相手が名前を変えた: ローカルDM履歴のキーを旧名→新名にマージする
+                try {
+                    const nc = JSON.parse(decodeURIComponent(signal.signal_data));
+                    if (nc && nc.oldName && nc.newName) {
+                        this._handlePartnerNameChanged(nc.oldName, nc.newName);
+                    }
+                } catch (_) { }
+                break;
         }
     }
 
@@ -3247,6 +3281,88 @@ class SecureVideoChat {
                 this.el.dmBadge.style.display = 'none';
                 this.el.dmBadge.textContent = '';
             }
+        }
+    }
+
+    // フレンドが名前を変えた時のローカルDM履歴マージ処理。
+    // 旧キー (dm:[me,oldName].sort()) の履歴を新キー (dm:[me,newName].sort()) へ統合し、
+    // 重複（msgId 一致、または ts/from/content/type 一致）を排除する。
+    // メッセージ内の from === oldName も newName に書き換えて表示の一貫性を保つ。
+    _handlePartnerNameChanged(oldName, newName) {
+        if (!oldName || !newName || oldName === newName) return;
+        if (!this.myName || oldName === this.myName) return;
+
+        const oldKey = `dm:${[this.myName, oldName].sort().join('|')}`;
+        const newKey = `dm:${[this.myName, newName].sort().join('|')}`;
+
+        // 履歴のマージ
+        const oldMsgs = this.localChatDB[oldKey];
+        if (Array.isArray(oldMsgs) && oldMsgs.length > 0) {
+            const remapped = oldMsgs.map(m => {
+                if (m && m.from === oldName) return { ...m, from: newName };
+                return m;
+            });
+            if (oldKey === newKey) {
+                // 念のためのno-op（自分の名前変更ケース等を想定）
+                this.localChatDB[oldKey] = remapped;
+            } else {
+                if (!Array.isArray(this.localChatDB[newKey])) this.localChatDB[newKey] = [];
+                const existing = this.localChatDB[newKey];
+                const seenIds = new Set(existing.filter(m => m && m.msgId).map(m => m.msgId));
+                const seenFallback = new Set(
+                    existing.filter(m => m && !m.msgId)
+                        .map(m => `${m.ts}|${m.from}|${m.type}|${m.content}`)
+                );
+                for (const m of remapped) {
+                    if (!m) continue;
+                    if (m.msgId) {
+                        if (seenIds.has(m.msgId)) continue;
+                        seenIds.add(m.msgId);
+                    } else {
+                        const k = `${m.ts}|${m.from}|${m.type}|${m.content}`;
+                        if (seenFallback.has(k)) continue;
+                        seenFallback.add(k);
+                    }
+                    existing.push(m);
+                }
+                // タイムスタンプ順にソート
+                existing.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+                delete this.localChatDB[oldKey];
+            }
+            this._saveLocalChatDB();
+        } else if (this.localChatDB[oldKey]) {
+            // 空配列だけ残っているケースを掃除
+            delete this.localChatDB[oldKey];
+            this._saveLocalChatDB();
+        }
+
+        // 既読タイムスタンプ
+        if (oldKey !== newKey && Object.prototype.hasOwnProperty.call(this.lastReadTs, oldKey)) {
+            const oldTs = this.lastReadTs[oldKey] || 0;
+            const curTs = this.lastReadTs[newKey] || 0;
+            this.lastReadTs[newKey] = Math.max(oldTs, curTs);
+            delete this.lastReadTs[oldKey];
+            this._saveLastReadTs?.();
+        }
+
+        // 未読カウントの引き継ぎ
+        if (this.dmUnreadCounts[oldName] != null) {
+            const sum = (this.dmUnreadCounts[newName] || 0) + this.dmUnreadCounts[oldName];
+            if (sum > 0) this.dmUnreadCounts[newName] = sum;
+            delete this.dmUnreadCounts[oldName];
+        }
+
+        // 現在開いている DM 相手が旧名なら新名に切り替えて再描画
+        if (this.dmPartner === oldName) {
+            this.dmPartner = newName;
+            if (this.el.dmModalTitle) this.el.dmModalTitle.textContent = newName;
+            this._renderDmMessages?.(newName);
+        }
+
+        // バッジ・一覧の再計算と再描画
+        this._recomputeAllUnreadBadges();
+        if (this.el.dmModal?.classList.contains('visible') && !this.dmPartner) {
+            this._renderDmConversationList();
         }
     }
 
