@@ -3984,16 +3984,12 @@ class SecureVideoChat {
 
     // value(%) → preGainNode.gain.value を計算して反映
     _applyVolumeGain(value) {
-        const v = parseInt(value) || 0;
+        let v = parseInt(value) || 0;
+        // 0–100%にクランプ
+        if (v < 0) v = 0;
+        if (v > 100) v = 100;
         // 0–100%: 通常のリニアゲイン（0.0 – 1.0）
-        // 100–600%: 100%地点を1.0として、最大で約7倍まで伸ばす（compressor後さらに×1.8で実効 約12.6倍）
-        let gain;
-        if (v <= 100) {
-            gain = v / 100;
-        } else {
-            // 100→1.0, 600→7.0 の線形
-            gain = 1 + ((v - 100) / 500) * 6;
-        }
+        const gain = v / 100;
         if (this.preGainNode) {
             this.preGainNode.gain.value = gain;
         } else if (this.el.remoteVideo) {
@@ -4007,10 +4003,12 @@ class SecureVideoChat {
         this._refreshVolumeUI(this.currentVolume);
     }
 
-    // 音量UI（バーの色、アイコン、数値、BOOSTバッジ）を更新する
+    // 音量UI（バーの色、アイコン、数値）を更新する
     // currentVolume が変わったとき / setupAudioBoost で再表示するときに呼ぶ
     _refreshVolumeUI(value) {
-        const v = parseInt(value);
+        let v = parseInt(value);
+        if (v > 100) v = 100;
+        if (v < 0) v = 0;
         if (!this.el.volumeControlButton) return;
         const icon = this.el.volumeControlButton.querySelector('i');
         if (icon) {
@@ -4018,22 +4016,15 @@ class SecureVideoChat {
             else if (v < 50) icon.className = 'fas fa-volume-down';
             else icon.className = 'fas fa-volume-up';
         }
-        const MAX = 600;
+        const MAX = 100;
         const pct = (v / MAX) * 100;
-        const overBoost = v > 100;
-        const normalPct = (100 / MAX) * 100;
-        let bg;
-        if (!overBoost) {
-            bg = `linear-gradient(to right, rgba(255,255,255,0.8) ${pct}%, rgba(255,255,255,0.2) ${pct}%)`;
-        } else {
-            bg = `linear-gradient(to right, rgba(255,255,255,0.8) ${normalPct}%, #f59e0b ${normalPct}%, #f59e0b ${pct}%, rgba(255,255,255,0.2) ${pct}%)`;
-        }
+        const bg = `linear-gradient(to right, rgba(255,255,255,0.8) ${pct}%, rgba(255,255,255,0.2) ${pct}%)`;
         if (this.el.volumeSlider) {
             this.el.volumeSlider.style.background = bg;
-            this.el.volumeSlider.classList.toggle('boosted', overBoost);
+            this.el.volumeSlider.classList.remove('boosted');
         }
         if (this.el.volumeValue) this.el.volumeValue.textContent = v;
-        if (this.el.boostBadge) this.el.boostBadge.classList.toggle('visible', overBoost);
+        if (this.el.boostBadge) this.el.boostBadge.classList.remove('visible');
     }
 
     startConnectionQualityMonitoring() {
