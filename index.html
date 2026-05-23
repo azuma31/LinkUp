@@ -216,7 +216,7 @@
                         <p class="waiting-title">LinkUpへようこそ！</p>
                     </div>
 
-                    <!-- ビデオグリッド -->
+                    <!-- ビデオグリッド（1対1モード） -->
                     <div id="videoGrid" class="video-grid" style="display:none">
                         <div class="video-container local">
                             <video id="localVideo" autoplay muted playsinline></video>
@@ -256,8 +256,23 @@
                         </div>
                     </div>
 
+                    <!-- メッシュ通話グリッド（複数人通話モード） -->
+                    <div id="meshGrid" class="mesh-grid" style="display:none" data-count="1">
+                        <!-- 動的にタイルが追加されます -->
+                    </div>
+
                     <!-- 通話中の切断ボタン -->
                     <div id="callControls" class="call-controls" style="display:none">
+                        <button id="meshInviteBtn" class="mesh-invite-btn" style="display:none" title="他のユーザーを招待">
+                            <i class="fas fa-user-plus"></i>
+                            招待
+                        </button>
+                        <button id="meshMicBtn" class="mesh-ctrl-btn" style="display:none" title="マイク">
+                            <i class="fas fa-microphone"></i>
+                        </button>
+                        <button id="meshCamBtn" class="mesh-ctrl-btn" style="display:none" title="カメラ">
+                            <i class="fas fa-video"></i>
+                        </button>
                         <button id="disconnectButton" class="end-call-btn">
                             <i class="fas fa-phone-slash"></i>
                             通話を終了
@@ -647,10 +662,24 @@
                 <button id="groupBackBtn" class="dm-back-btn"><i class="fas fa-arrow-left"></i> 戻る</button>
                 <span id="groupChatName" class="group-chat-name"></span>
                 <div class="group-chat-actions">
+                    <button id="groupCallStartBtn" class="icon-button group-call-btn" title="グループ通話を開始"><i class="fas fa-phone"></i></button>
                     <button id="groupSettingsBtn" class="icon-button" title="グループ設定"><i class="fas fa-cog"></i></button>
                     <button id="inviteGroupBtn" class="icon-button" title="招待"><i class="fas fa-user-plus"></i></button>
                     <button id="leaveGroupBtn" class="icon-button leave-btn" title="退出"><i class="fas fa-door-open"></i></button>
                 </div>
+            </div>
+            <!-- グループ通話進行中バナー（このグループで通話中の場合のみ表示） -->
+            <div id="groupActiveCallBanner" class="group-active-call-banner" style="display:none">
+                <div class="banner-left">
+                    <i class="fas fa-phone-volume banner-pulse-icon"></i>
+                    <div class="banner-text">
+                        <span class="banner-title">通話中</span>
+                        <span class="banner-sub" id="groupActiveCallSub">参加中: 1人</span>
+                    </div>
+                </div>
+                <button id="groupActiveCallJoinBtn" class="banner-join-btn">
+                    <i class="fas fa-phone"></i> 参加する
+                </button>
             </div>
             <div id="groupMessages" class="chat-messages"></div>
             <div class="chat-input-area">
@@ -783,6 +812,52 @@
             </button>
             <button id="rejectGroupInviteBtn" class="reject-btn">
                 <i class="fas fa-times"></i> 断る
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== メッシュ通話招待モーダル（受信側）========== -->
+<div id="meshInviteModal" class="modal">
+    <div class="modal-content incoming-call-content">
+        <div class="incoming-call-icon" style="background:linear-gradient(135deg,#7c3aed,#a78bfa 50%,#c4b5fd);box-shadow:0 8px 24px rgba(124,58,237,0.35)">
+            <i class="fas fa-users"></i>
+        </div>
+        <h2 class="incoming-call-title">グループ通話への招待</h2>
+        <p class="incoming-call-from">
+            <strong id="meshInviteFrom"></strong> さんがグループ通話に招待しています
+        </p>
+        <p class="mesh-invite-members" id="meshInviteMembers"></p>
+        <div class="incoming-call-actions">
+            <button id="acceptMeshInviteBtn" class="accept-btn">
+                <i class="fas fa-phone"></i> 参加する
+            </button>
+            <button id="rejectMeshInviteBtn" class="reject-btn">
+                <i class="fas fa-times"></i> 断る
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== メッシュ招待先選択モーダル（送信側、通話中に「招待」を押した時）========== -->
+<div id="meshInviteSelectModal" class="modal">
+    <div class="modal-content" style="max-width:420px">
+        <h2 style="margin-bottom:1rem;display:flex;align-items:center;gap:0.5rem">
+            <span style="display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#7c3aed,#a78bfa);color:#fff;box-shadow:0 4px 12px rgba(124,58,237,0.3)">
+                <i class="fas fa-user-plus" style="font-size:0.95rem"></i>
+            </span>
+            通話に招待する
+        </h2>
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1rem">
+            通話参加者のフレンドのみ招待できます。<br>
+            <span id="meshInviteSlotInfo" style="color:var(--text-primary);font-weight:500"></span>
+        </p>
+        <div id="meshInviteCandidateList" class="mesh-invite-candidate-list">
+            <div class="friend-empty"><i class="fas fa-user-slash"></i><p>招待できるフレンドがいません</p></div>
+        </div>
+        <div style="display:flex;gap:0.5rem;margin-top:1rem">
+            <button id="meshInviteSelectCancelBtn" class="auth-submit-btn" style="flex:1;background:var(--text-secondary)">
+                閉じる
             </button>
         </div>
     </div>

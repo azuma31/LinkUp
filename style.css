@@ -2836,3 +2836,402 @@ button:disabled {
 .group-square-avatar {
     border-radius: 12px !important;
 }
+
+/* =====================================================
+   メッシュ通話関連（複数人通話）
+   ===================================================== */
+
+/* グループチャット内の通話ボタン */
+.group-call-btn {
+    color: var(--success-color) !important;
+}
+.group-call-btn:hover {
+    background-color: rgba(22, 163, 74, 0.1) !important;
+}
+.group-call-btn.active {
+    background-color: var(--success-color) !important;
+    color: white !important;
+}
+
+/* グループチャット画面に表示される「通話中バナー」 */
+.group-active-call-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    margin: 0.5rem 1rem 0;
+    background: linear-gradient(135deg, #f0fdf4, #dcfce7);
+    border: 1px solid #86efac;
+    border-radius: 12px;
+    box-shadow: 0 2px 8px rgba(22, 163, 74, 0.15);
+}
+
+.group-active-call-banner .banner-left {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.banner-pulse-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--success-color);
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    animation: bannerPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes bannerPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.5); }
+    50% { box-shadow: 0 0 0 8px rgba(22, 163, 74, 0); }
+}
+
+.banner-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.banner-title {
+    font-weight: 600;
+    color: #166534;
+    font-size: 0.9rem;
+}
+
+.banner-sub {
+    font-size: 0.75rem;
+    color: #15803d;
+}
+
+.banner-join-btn {
+    padding: 0.5rem 1rem;
+    background: var(--success-color);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: all 0.2s;
+}
+.banner-join-btn:hover {
+    background: #15803d;
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(22, 163, 74, 0.3);
+}
+
+/* グループ一覧アイテムの通話中バッジ */
+.dm-conv-item .group-active-call-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.15rem 0.5rem;
+    background: var(--success-color);
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 999px;
+    margin-left: 0.4rem;
+    animation: bannerPulse 1.8s ease-in-out infinite;
+}
+
+/* メッシュ通話グリッド */
+.mesh-grid {
+    display: grid;
+    gap: 0.75rem;
+    flex: 1;
+    min-height: 0;
+    padding: 0;
+    align-content: stretch;
+    justify-content: stretch;
+}
+
+.mesh-grid[data-count="1"] { grid-template-columns: 1fr; grid-template-rows: 1fr; }
+.mesh-grid[data-count="2"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr; }
+.mesh-grid[data-count="3"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.mesh-grid[data-count="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.mesh-grid[data-count="5"],
+.mesh-grid[data-count="6"] { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.mesh-grid[data-count="7"],
+.mesh-grid[data-count="8"] { grid-template-columns: 1fr 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+
+/* メッシュタイル（LinkUp白基調デザイン） */
+.mesh-tile {
+    position: relative;
+    background: #1a1a1a;
+    border-radius: var(--border-radius-lg);
+    overflow: hidden;
+    box-shadow: var(--shadow-md);
+    min-height: 0;
+    min-width: 0;
+    border: 2px solid transparent;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.mesh-tile.self {
+    border-color: var(--primary-color);
+}
+
+.mesh-tile.speaking {
+    border-color: var(--success-color);
+    box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.25), var(--shadow-md);
+}
+
+.mesh-tile video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.mesh-tile video.mirror {
+    transform: scaleX(-1);
+}
+
+/* カメラオフ時の表示 */
+.mesh-tile-no-video {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #f8fafc, #e2e8f0);
+    color: var(--primary-color);
+    font-size: clamp(2rem, 8vw, 4rem);
+    font-weight: 700;
+}
+
+.mesh-tile-no-video.has-avatar {
+    background-size: cover;
+    background-position: center;
+}
+.mesh-tile-no-video.has-avatar::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.25);
+}
+
+/* タイル下部のラベル */
+.mesh-tile-label {
+    position: absolute;
+    bottom: 0.5rem;
+    left: 0.5rem;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(8px);
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    max-width: calc(100% - 1rem);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.mesh-tile.self .mesh-tile-label {
+    background: rgba(37, 99, 235, 0.95);
+    color: white;
+}
+
+/* タイル右上のステータスアイコン */
+.mesh-tile-status {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    display: flex;
+    gap: 0.35rem;
+}
+
+.mesh-status-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    background: rgba(255,255,255,0.92);
+    color: var(--text-primary);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+}
+
+.mesh-status-icon.muted {
+    background: var(--danger-color);
+    color: white;
+}
+
+.mesh-status-icon.cam-off {
+    background: var(--danger-color);
+    color: white;
+}
+
+/* 招待ボタン（call-controls内） */
+.mesh-invite-btn {
+    padding: 0.75rem 1.25rem;
+    background: linear-gradient(135deg, #7c3aed, #a78bfa);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.3);
+    transition: all 0.2s;
+}
+.mesh-invite-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(124, 58, 237, 0.4);
+}
+
+/* call-controls をflex化（複数ボタン対応） */
+.call-controls {
+    gap: 0.75rem;
+}
+
+/* メッシュ通話中のコントロールボタン（マイク・カメラ） */
+.mesh-ctrl-btn {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.2s;
+}
+.mesh-ctrl-btn:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
+.mesh-ctrl-btn.off {
+    background: var(--danger-color);
+    color: white;
+    border-color: var(--danger-color);
+}
+
+/* メッシュ招待モーダル：メンバー情報の表示 */
+.mesh-invite-members {
+    margin: 0.5rem 0 1rem;
+    padding: 0.5rem 1rem;
+    background: var(--background-color);
+    border-radius: 8px;
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    text-align: center;
+}
+
+/* メッシュ招待先候補リスト */
+.mesh-invite-candidate-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--background-color);
+}
+
+.mesh-invite-candidate {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    cursor: pointer;
+    transition: background 0.15s;
+    border-bottom: 1px solid var(--border-color);
+}
+.mesh-invite-candidate:last-child { border-bottom: none; }
+.mesh-invite-candidate:hover {
+    background: var(--primary-light);
+}
+.mesh-invite-candidate.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+.mesh-invite-candidate-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
+    color: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    background-size: cover;
+    background-position: center;
+    flex-shrink: 0;
+}
+.mesh-invite-candidate-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+.mesh-invite-candidate-name {
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.mesh-invite-candidate-sub {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+.mesh-invite-candidate-send {
+    padding: 0.4rem 0.8rem;
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 999px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+.mesh-invite-candidate-send:hover {
+    background: var(--primary-dark);
+}
+.mesh-invite-candidate-send:disabled {
+    background: var(--text-secondary);
+    cursor: not-allowed;
+}
+
+/* レスポンシブ */
+@media (max-width: 768px) {
+    .mesh-grid[data-count="3"],
+    .mesh-grid[data-count="4"] { grid-template-columns: 1fr; grid-template-rows: repeat(auto-fit, minmax(160px, 1fr)); }
+    .mesh-grid[data-count="5"],
+    .mesh-grid[data-count="6"],
+    .mesh-grid[data-count="7"],
+    .mesh-grid[data-count="8"] { grid-template-columns: 1fr 1fr; grid-template-rows: repeat(auto-fit, minmax(120px, 1fr)); }
+
+    .group-active-call-banner {
+        flex-direction: column;
+        gap: 0.75rem;
+        align-items: stretch;
+    }
+    .banner-join-btn { justify-content: center; }
+}
