@@ -3742,15 +3742,10 @@ class SecureVideoChat {
     // =====================================================
 
     /**
-     * メッシュ通話用のpeer_id（個別）。
-     * 同一ユーザーが何度も入退室しても衝突しないよう、roomId + random を組み合わせる。
-     * ホストは「meshcall-{roomId}-host」固定（他peerが見つけやすいように）
+     * メッシュ通話用のpeer ID生成は廃止。
+     * LinkUpの既存方式（サーバー側でpeer IDを自動生成し、Firebase経由でIDを交換する）
+     * に合わせる。
      */
-    _makeMeshPeerId(roomId, isHost) {
-        if (isHost) return `meshcall-${roomId}-host`;
-        const rand = Math.random().toString(36).slice(2, 8);
-        return `meshcall-${roomId}-${rand}`;
-    }
 
     _genMeshRoomId() {
         const chars = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -3940,18 +3935,13 @@ class SecureVideoChat {
      * メッシュ通話のコア。
      * 既存の peer をいったん破棄してメッシュ専用peerを建てる。
      * 1対1からの昇格時もこの関数を通る（その場合 existingPeers でメンバー情報を引き継ぐ）。
+     *
+     * peer IDはサーバー側自動生成（LinkUpの既存方式と同じ）。
+     * 参加者間でのpeer ID交換は、Firebase経由のシグナル + メッシュ確立後の
+     * mesh-helloメッセージで行う。
      */
     async _enterMeshCall(roomId, isHost, opts = {}) {
         const { originGroupId = null, hostPeerId = null, existingPeers = null, existingStream = null } = opts;
-
-        // 1対1通話中なら、昇格処理として既存の接続を一旦終了する（あとでメッシュ側で再接続）
-        const wasInOneToOne = this.callMode === 'one-to-one';
-        let pre1To1Partner = null;
-        let pre1To1PartnerName = null;
-        if (wasInOneToOne) {
-            pre1To1Partner = this._targetPeerId || (this.currentCall && this.currentCall.peer);
-            pre1To1PartnerName = this.callTargetName;
-        }
 
         // ローカルストリームを準備
         if (!this.localStream) {
@@ -3966,12 +3956,9 @@ class SecureVideoChat {
         this.dataConnection = null;
         this.peer = null;
 
-        // メッシュpeer ID を構築
-        const myMeshPeerId = this._makeMeshPeerId(roomId, isHost);
-
-        // 新規メッシュpeerを生成
+        // 新規メッシュpeerを生成（ID指定なし=サーバー側で自動生成）
         await new Promise((resolve, reject) => {
-            const peer = new Peer(myMeshPeerId, {
+            const peer = new Peer({
                 config: {
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
@@ -3984,29 +3971,30 @@ class SecureVideoChat {
                 debug: 1,
             });
 
-            const tm = setTimeout(() => reject(new Error('シグナリングサーバーへの接続がタイムアウトしました')), 15000);
+            const tm = setTimeout(() => {
+                try { peer.destroy(); } catch (_) { }
+                reject(new Error('シグナリングサーバーへの接続がタイムアウトしました'));
+            }, 15000);
 
-            peer.on('open', id => {
+            peer.on('open', async id => {
                 clearTimeout(tm);
                 this.peer = peer;
+                // heartbeatでもメッシュpeer.idを通知（オンラインリストとの整合性のため）
+                if (this.token) {
+                    try { await FbAPI.heartbeat(this.token, id); } catch (_) { }
+                }
                 resolve(id);
             });
 
             peer.on('error', err => {
                 console.error('Mesh Peer error:', err);
-                if (err.type === 'unavailable-id') {
-                    clearTimeout(tm);
-                    // ホストとして開始しようとしたがIDが既に使用中 → 別IDで再試行
-                    if (isHost) {
-                        reject(new Error('ルームIDが使用中です。再度お試しください。'));
-                    } else {
-                        reject(new Error('ピアID重複: 再度お試しください。'));
-                    }
-                    return;
-                }
                 if (err.type === 'peer-unavailable') {
-                    return; // 個別peerが消えただけ
+                    return; // 個別peerが消えただけ。再接続は試行しない
                 }
+                // 致命的エラー
+                clearTimeout(tm);
+                try { peer.destroy(); } catch (_) { }
+                reject(err);
             });
 
             // 着信通話（他peerからのcall）
@@ -4021,7 +4009,11 @@ class SecureVideoChat {
             });
 
             peer.on('disconnected', () => {
-                setTimeout(() => { if (this.peer === peer) this.peer.reconnect(); }, 3000);
+                setTimeout(() => {
+                    if (this.peer === peer) {
+                        try { this.peer.reconnect(); } catch (_) { }
+                    }
+                }, 3000);
             });
         });
 
@@ -4030,7 +4022,7 @@ class SecureVideoChat {
         this.meshRoomId = roomId;
         this.meshIsHost = isHost;
         this.meshOriginGroupId = originGroupId;
-        this.meshHostPeerId = isHost ? this.peer.id : (hostPeerId || this._makeMeshPeerId(roomId, true));
+        this.meshHostPeerId = isHost ? this.peer.id : hostPeerId; // 非ホストは引数で受け取ったhostPeerIdを保持
         this.meshPeers = new Map();
 
         // UI切替: 1対1のvideoGridを隠してmeshGridを表示
@@ -4057,14 +4049,6 @@ class SecureVideoChat {
         if (!isHost && this.meshHostPeerId) {
             setTimeout(() => this._meshConnectToPeer(this.meshHostPeerId), 500);
         }
-
-        // 1対1からの昇格時：以前の1対1相手にもメッシュ接続を試みる
-        // ※ 旧peerを潰したので、相手側も新しいメッシュpeer ID を取得しないと接続できない。
-        //   ここでは「相手側にも _enterMeshCall を実行させる」シグナルを送るか、
-        //   相手は招待モーダル経由で参加する設計にする（→ 招待を出した側 / 出された側 の双方が
-        //   この関数を通って同じ roomId にぶら下がる）。
-        // → 後述: 1対1 → mesh 移行は「招待者が _promoteOneToOneToMesh を呼び、招待者と既存相手が
-        //   それぞれ独立に _enterMeshCall を呼ぶ」フローになる。
 
         // 自分も activeGroupCalls に参加者として記録（グループ通話の場合）
         if (originGroupId) {
@@ -4678,7 +4662,7 @@ class SecureVideoChat {
                 try {
                     await this._enterMeshCall(inv.roomId, false, {
                         originGroupId: null,
-                        hostPeerId: inv.hostPeerId || this._makeMeshPeerId(inv.roomId, true),
+                        hostPeerId: inv.hostPeerId,
                     });
                     this.showNotification('通話', `グループ通話に切り替わりました`, 'info');
                 } catch (e) {
