@@ -272,6 +272,42 @@ class FbAPI {
         }
     }
 
+    // friends ノード全体をリアルタイム購読する
+    // コールバックには { friends, incoming, outgoing } を myName 基準で計算して渡す
+    static subscribeFriends(getMyName, callback) {
+        this.unsubscribeFriends();
+        const ref = this._db.ref('friends');
+        this._friendsRef = ref;
+        this._friendsHandler = ref.on('value', snap => {
+            const all = snap.val() || {};
+            const myName = typeof getMyName === 'function' ? getMyName() : getMyName;
+            if (!myName) return;
+            const friends = [];
+            const incoming = [];
+            const outgoing = [];
+            for (const k in all) {
+                const v = all[k];
+                if (!v) continue;
+                if (v.status === 'accepted') {
+                    if (v.from === myName) friends.push(v.to);
+                    else if (v.to === myName) friends.push(v.from);
+                } else if (v.status === 'pending') {
+                    if (v.to === myName) incoming.push({ from: v.from });
+                    else if (v.from === myName) outgoing.push({ to: v.to });
+                }
+            }
+            try { callback({ ok: true, friends, incoming, outgoing }); } catch (_) { }
+        });
+    }
+
+    static unsubscribeFriends() {
+        if (this._friendsRef && this._friendsHandler) {
+            this._friendsRef.off('value', this._friendsHandler);
+            this._friendsRef = null;
+            this._friendsHandler = null;
+        }
+    }
+
     // ----------------- フレンド申請 -----------------
     static async sendFriendRequest(token, to) {
         if (!token || !to) return { ok: false, error: 'パラメータが不足しています' };
@@ -1242,6 +1278,10 @@ class SecureVideoChat {
             }
         }).catch(() => { });
 
+        // friends ノードのリアルタイム購読を開始
+        // （相手が名前を変えたりフレンド操作したときに自動でこちらのUIが追従する）
+        this.subscribeFriendStream();
+
         // onDisconnect で presence を自動削除
         FbAPI.setupPresenceOnDisconnect(this.myName);
 
@@ -1508,6 +1548,7 @@ class SecureVideoChat {
         this.stopHeartbeat();
         this.stopOnlineListPolling();
         FbAPI.unsubscribeSignals();
+        FbAPI.unsubscribeFriends();
         if (this._qualityInterval) {
             clearInterval(this._qualityInterval);
             this._qualityInterval = null;
@@ -1733,21 +1774,41 @@ class SecureVideoChat {
         try {
             const res = await FbAPI.getFriends(this.token);
             if (!res.ok) return;
-            const prevFriends = this.friendNames ? new Set(this.friendNames) : new Set();
-            this.friendNames = new Set([
-                ...(res.friends || []),
-                ...(res.incoming || []).map(r => r.from),
-            ]);
-            const incomingCount = (res.incoming || []).length;
-            this._updateFriendBadge(incomingCount);
-            this._cachedFriendData = res;
-            // フレンドセットに変更があればオンラインリストの並び・通話ボタン表示を更新
-            const changed = prevFriends.size !== this.friendNames.size ||
-                [...this.friendNames].some(n => !prevFriends.has(n));
-            if (changed) this._rerenderOnlineListIfPossible();
+            this._applyFriendData(res);
         } catch (e) {
             console.warn('フレンドリスト取得失敗:', e);
         }
+    }
+
+    // 取得した friends データをキャッシュ・バッジ・UIに反映する共通処理
+    _applyFriendData(res) {
+        const prevFriends = this.friendNames ? new Set(this.friendNames) : new Set();
+        this.friendNames = new Set([
+            ...(res.friends || []),
+            ...(res.incoming || []).map(r => r.from),
+        ]);
+        const incomingCount = (res.incoming || []).length;
+        this._updateFriendBadge(incomingCount);
+        this._cachedFriendData = res;
+        // フレンドセットに変更があればオンラインリストの並び・通話ボタン表示を更新
+        const changed = prevFriends.size !== this.friendNames.size ||
+            [...this.friendNames].some(n => !prevFriends.has(n)) ||
+            [...prevFriends].some(n => !this.friendNames.has(n));
+        if (changed) this._rerenderOnlineListIfPossible();
+        // フレンドモーダルが開いていれば即時再描画
+        if (this.el.friendModal && this.el.friendModal.classList.contains('visible')) {
+            this._renderFriendModal();
+        }
+    }
+
+    // friends ノードをリアルタイム購読する
+    // 相手が名前を変更した場合や、別端末でフレンド操作が行われた場合に
+    // こちら側の friendNames キャッシュとUIを自動更新する
+    subscribeFriendStream() {
+        if (!this.myName) return;
+        FbAPI.subscribeFriends(() => this.myName, (res) => {
+            if (res?.ok) this._applyFriendData(res);
+        });
     }
 
     _updateFriendBadge(count) {
@@ -2112,18 +2173,12 @@ class SecureVideoChat {
                 // フレンドキャッシュを再取得（自分の名前変更後、表示用キャッシュをリフレッシュ）
                 try {
                     const fr = await FbAPI.getFriends(this.token);
-                    if (fr?.ok) {
-                        this.friendNames = new Set([
-                            ...(fr.friends || []),
-                            ...(fr.incoming || []).map(r => r.from),
-                        ]);
-                        this._cachedFriendData = fr;
-                        this._updateFriendBadge((fr.incoming || []).length);
-                    }
+                    if (fr?.ok) this._applyFriendData(fr);
                 } catch (_) { }
 
-                // シグナル購読を新しい名前で再開
+                // シグナル購読・フレンド購読を新しい名前で再開
                 this.subscribeSignalStream();
+                this.subscribeFriendStream();
                 FbAPI.setupPresenceOnDisconnect(this.myName);
 
                 this.showNotification('設定', `本名を「${newName}」に変更しました`, 'success');
