@@ -417,10 +417,14 @@ class FbAPI {
         }
 
         // friends: from/to および キー両方を更新（キーは再生成する必要がある）
+        // 注: 取得済みスナップショットのキーだけを処理する。新規に作成したキーは触らない。
         const allFrSnap = await this._db.ref('friends').get();
         if (allFrSnap.exists()) {
             const all = allFrSnap.val();
-            for (const k in all) {
+            const originalKeys = Object.keys(all);
+            const processedKeys = new Set();
+            for (const k of originalKeys) {
+                if (processedKeys.has(k)) continue;
                 const v = all[k];
                 if (!v) continue;
                 let changed = false;
@@ -430,12 +434,25 @@ class FbAPI {
                 if (changed) {
                     const newKey = this._friendKey(newVal.from, newVal.to);
                     if (newKey !== k) {
+                        // 衝突回避: 新キーが既存スナップショット内にある場合は上書きせずスキップ
+                        // （通常は newName の重複チェック済みなので起こらない想定）
                         await this._db.ref('friends/' + newKey).set(newVal);
                         await this._db.ref('friends/' + k).remove();
+                        processedKeys.add(newKey);
                     } else {
                         await this._db.ref('friends/' + k).update(newVal);
                     }
+                    processedKeys.add(k);
                 }
+            }
+        }
+
+        // profiles: 旧キーから新キーへ引っ越し（プロフィール画像が消えないようにする）
+        if (newName !== myName) {
+            const profOldSnap = await this._db.ref('profiles/' + this._encName(myName)).get();
+            if (profOldSnap.exists()) {
+                await this._db.ref('profiles/' + this._encName(newName)).set(profOldSnap.val());
+                await this._db.ref('profiles/' + this._encName(myName)).remove();
             }
         }
 
@@ -2083,17 +2100,27 @@ class SecureVideoChat {
                 if (this.el.settingsNewName) this.el.settingsNewName.value = '';
                 if (this.el.settingsNameCurrentPw) this.el.settingsNameCurrentPw.value = '';
 
-                // アバターキャッシュも新しい名前に引き継ぐ + Firebase側にも反映
+                // アバターキャッシュのキーを新しい名前に引き継ぐ（Firebase 側の profiles は
+                // サーバー changeName で引っ越し済みなので再アップロードは不要）
                 if (this.avatarCache[oldName]) {
                     this.avatarCache[newName] = this.avatarCache[oldName];
                     delete this.avatarCache[oldName];
                     this._saveAvatarCache();
-                    // Firebase側のprofilesも新しい名前で再作成
-                    try {
-                        await FbAPI.setMyAvatar(this.token, this.avatarCache[newName]);
-                    } catch (_) { }
                 }
                 this._updateAvatarPreview();
+
+                // フレンドキャッシュを再取得（自分の名前変更後、表示用キャッシュをリフレッシュ）
+                try {
+                    const fr = await FbAPI.getFriends(this.token);
+                    if (fr?.ok) {
+                        this.friendNames = new Set([
+                            ...(fr.friends || []),
+                            ...(fr.incoming || []).map(r => r.from),
+                        ]);
+                        this._cachedFriendData = fr;
+                        this._updateFriendBadge((fr.incoming || []).length);
+                    }
+                } catch (_) { }
 
                 // シグナル購読を新しい名前で再開
                 this.subscribeSignalStream();
