@@ -591,6 +591,7 @@ button:disabled {
 .user-item.is-friend {
     background: linear-gradient(to right, rgba(16, 185, 129, 0.06), transparent 60%);
 }
+
     .user-item.is-friend:hover {
         background: linear-gradient(to right, rgba(16, 185, 129, 0.12), var(--background-color));
     }
@@ -2497,10 +2498,11 @@ button:disabled {
     letter-spacing: 0.02em;
     opacity: 0.85;
 }
-    .chat-msg.theirs .chat-msg-readreceipt {
-        /* 念のため：相手側メッセージには出さない（rendererで弾いているが保険） */
-        display: none;
-    }
+
+.chat-msg.theirs .chat-msg-readreceipt {
+    /* 念のため：相手側メッセージには出さない（rendererで弾いているが保険） */
+    display: none;
+}
 
 .chat-msg-system {
     text-align: center;
@@ -2835,4 +2837,139 @@ button:disabled {
 /* グループ一覧/チャット用の四角アバター */
 .group-square-avatar {
     border-radius: 12px !important;
+}
+
+/* =====================================================
+   ビデオ通話: カメラOFF時のアバター表示
+   ===================================================== */
+.video-avatar-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* z-indexは指定しない: .video-overlayより背面に置く（ボタン類を隠さない） */
+    pointer-events: none;
+}
+
+/* .video-overlay（操作ボタン群）を確実に最前面に */
+.video-overlay {
+    z-index: 2;
+}
+
+.video-avatar-circle {
+    width: 30%;
+    aspect-ratio: 1 / 1;
+    max-width: 180px;
+    max-height: 180px;
+    min-width: 80px;
+    min-height: 80px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--primary-color), #7c3aed);
+    background-size: cover;
+    background-position: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 3rem;
+    font-weight: 700;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    border: 3px solid rgba(255,255,255,0.1);
+}
+
+    .video-avatar-circle.has-image {
+        background-color: transparent;
+        color: transparent;
+    }
+
+/* 画面共有中の自分ボタンを強調 */
+.control-button.sharing {
+    background-color: #16a34a !important;
+    color: #fff !important;
+    box-shadow: 0 0 0 3px rgba(22,163,74,0.3);
+}
+
+    .control-button.sharing:hover {
+        background-color: #15803d !important;
+    }
+
+/* =====================================================
+   メッセージ操作メニュー（取り消し用）
+   ===================================================== */
+.msg-action-menu {
+    position: fixed;
+    z-index: 10000;
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    padding: 0.35rem;
+    min-width: 180px;
+    animation: msgMenuFade 0.12s ease-out;
+}
+
+@keyframes msgMenuFade {
+    from {
+        opacity: 0;
+        transform: translateY(-4px) scale(0.98);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.msg-action-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    width: 100%;
+    padding: 0.55rem 0.8rem;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    color: var(--danger-color);
+    font-size: 0.88rem;
+    font-weight: 500;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.12s ease;
+}
+
+    .msg-action-item:hover {
+        background: rgba(220,38,38,0.08);
+    }
+
+    .msg-action-item i {
+        font-size: 0.95rem;
+        width: 16px;
+        text-align: center;
+    }
+
+/* 取り消し済みメッセージのバブル */
+.chat-msg-bubble.recalled {
+    font-style: italic;
+    opacity: 0.7;
+    background: transparent !important;
+    border: 1px dashed var(--border-color) !important;
+    color: var(--text-secondary) !important;
+}
+
+.chat-msg.mine .chat-msg-bubble.recalled {
+    color: rgba(255,255,255,0.85) !important;
+    border-color: rgba(255,255,255,0.4) !important;
+    background: rgba(255,255,255,0.08) !important;
+}
+
+.chat-msg-bubble.recalled .recalled-icon {
+    margin-right: 0.35rem;
+    font-size: 0.8rem;
+}
+
+/* 自分のメッセージにホバーで取り消しヒントカーソル */
+.chat-msg.mine .chat-msg-bubble:not(.recalled) {
+    cursor: context-menu;
 }

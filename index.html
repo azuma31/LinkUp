@@ -220,6 +220,12 @@
                     <div id="videoGrid" class="video-grid" style="display:none">
                         <div class="video-container local">
                             <video id="localVideo" autoplay muted playsinline></video>
+                            <!-- 自分のカメラOFF時に表示するアバター -->
+                            <div id="localAvatarOverlay" class="video-avatar-overlay" style="display:none">
+                                <div id="localAvatarCircle" class="video-avatar-circle">
+                                    <span id="localAvatarInitial">?</span>
+                                </div>
+                            </div>
                             <div class="video-overlay">
                                 <span class="participant-name" id="localName">あなた</span>
                                 <div class="video-controls">
@@ -229,12 +235,21 @@
                                     <button id="toggleVideoButton" class="control-button" title="カメラ切替">
                                         <i class="fas fa-video"></i>
                                     </button>
+                                    <button id="screenShareButton" class="control-button" title="画面共有">
+                                        <i class="fas fa-desktop"></i>
+                                    </button>
                                 </div>
                             </div>
                         </div>
 
                         <div class="video-container remote">
                             <video id="remoteVideo" autoplay playsinline></video>
+                            <!-- 相手のカメラOFF時に表示するアバター -->
+                            <div id="remoteAvatarOverlay" class="video-avatar-overlay" style="display:none">
+                                <div id="remoteAvatarCircle" class="video-avatar-circle">
+                                    <span id="remoteAvatarInitial">?</span>
+                                </div>
+                            </div>
                             <div class="video-overlay">
                                 <span class="participant-name" id="remoteName">相手</span>
                                 <div class="video-controls">
@@ -801,6 +816,32 @@
             <button id="newDmCancelBtn" class="reject-btn" style="flex:1">キャンセル</button>
             <button id="newDmConfirmBtn" class="accept-btn" style="flex:1">
                 <i class="fas fa-comment"></i> 開始
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== メッセージ操作メニュー（取り消し等） ========== -->
+<div id="msgActionMenu" class="msg-action-menu" style="display:none">
+    <button id="msgRecallBtn" class="msg-action-item">
+        <i class="fas fa-rotate-left"></i> メッセージを取り消す
+    </button>
+</div>
+
+<!-- ========== メッセージ取り消し確認モーダル ========== -->
+<div id="recallConfirmModal" class="modal">
+    <div class="modal-content" style="max-width:380px">
+        <h2 style="margin-top:0;display:flex;align-items:center;gap:0.5rem;font-size:1.1rem">
+            <i class="fas fa-rotate-left" style="color:var(--danger-color)"></i>
+            メッセージを取り消しますか？
+        </h2>
+        <p style="color:var(--text-secondary);margin:0.5rem 0 1rem;font-size:0.9rem">
+            このメッセージはあなた・相手の両方の画面で「メッセージが取り消されました」と表示されます。元に戻すことはできません。
+        </p>
+        <div style="display:flex;gap:0.75rem;margin-top:1rem">
+            <button id="recallCancelBtn" class="reject-btn" style="flex:1">キャンセル</button>
+            <button id="recallConfirmBtn" class="accept-btn" style="flex:1;background:var(--danger-color)">
+                <i class="fas fa-check"></i> 取り消す
             </button>
         </div>
     </div>

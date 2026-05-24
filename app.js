@@ -836,8 +836,11 @@ class SecureVideoChat {
         this.localStream = null;
         this.encryptionKey = null;
         this.isAudioEnabled = true;
-        this.isVideoEnabled = true;
+        this.isVideoEnabled = false; // カメラはOFFスタート（要件1）
         this.isMediaReady = false;
+        this.isScreenSharing = false;
+        this.savedCameraTrack = null; // 画面共有中に元のカメラトラックを退避
+        this.remoteCameraOff = false; // 相手のカメラ状態
         this.audioContext = null;
         this.gainNode = null;
         this.currentVolume = 100;
@@ -916,6 +919,18 @@ class SecureVideoChat {
             disconnectButton: document.getElementById('disconnectButton'),
             toggleMicButton: document.getElementById('toggleMicButton'),
             toggleVideoButton: document.getElementById('toggleVideoButton'),
+            screenShareButton: document.getElementById('screenShareButton'),
+            localAvatarOverlay: document.getElementById('localAvatarOverlay'),
+            localAvatarCircle: document.getElementById('localAvatarCircle'),
+            localAvatarInitial: document.getElementById('localAvatarInitial'),
+            remoteAvatarOverlay: document.getElementById('remoteAvatarOverlay'),
+            remoteAvatarCircle: document.getElementById('remoteAvatarCircle'),
+            remoteAvatarInitial: document.getElementById('remoteAvatarInitial'),
+            msgActionMenu: document.getElementById('msgActionMenu'),
+            msgRecallBtn: document.getElementById('msgRecallBtn'),
+            recallConfirmModal: document.getElementById('recallConfirmModal'),
+            recallConfirmBtn: document.getElementById('recallConfirmBtn'),
+            recallCancelBtn: document.getElementById('recallCancelBtn'),
             connectionQuality: document.getElementById('connectionQuality'),
             volumeControlButton: document.getElementById('volumeControlButton'),
             volumeSlider: document.getElementById('volumeSlider'),
@@ -1426,6 +1441,9 @@ class SecureVideoChat {
         });
         this.el.toggleMicButton.addEventListener('click', () => this.toggleAudio());
         this.el.toggleVideoButton.addEventListener('click', () => this.toggleVideo());
+        if (this.el.screenShareButton) {
+            this.el.screenShareButton.addEventListener('click', () => this.toggleScreenShare());
+        }
         this.el.volumeControlButton.addEventListener('click', () => this.toggleVolumeControl());
         this.el.volumeSlider.addEventListener('input', e => this.updateVolume(e.target.value));
 
@@ -1558,6 +1576,9 @@ class SecureVideoChat {
         // ブロック
         if (this.el.addBlockBtn) this.el.addBlockBtn.addEventListener('click', () => this._addBlock());
         if (this.el.blockSearchInput) this.el.blockSearchInput.addEventListener('keydown', e => { if (e.key === 'Enter') this._addBlock(); });
+
+        // メッセージ取り消し用メニューのセットアップ
+        this._setupRecallMenu();
     }
 
     doLogout() {
@@ -1667,9 +1688,9 @@ class SecureVideoChat {
             const tracks = this.localStream.getTracks();
             const allActive = tracks.length > 0 && tracks.every(t => t.readyState === 'live');
             if (allActive) {
-                // トラックを有効化し直す（無効化されていた場合に備えて）
+                // トラックを状態に合わせて有効化（無効化されていた場合に備えて）
                 this.localStream.getAudioTracks().forEach(t => t.enabled = this.isAudioEnabled !== false);
-                this.localStream.getVideoTracks().forEach(t => t.enabled = this.isVideoEnabled !== false);
+                this.localStream.getVideoTracks().forEach(t => t.enabled = this.isVideoEnabled === true);
                 if (this.el.localVideo) {
                     if (this.el.localVideo.srcObject !== this.localStream) {
                         this.el.localVideo.srcObject = this.localStream;
@@ -1677,6 +1698,9 @@ class SecureVideoChat {
                     this.el.localVideo.style.display = '';
                 }
                 this.isMediaReady = true;
+                // UIを最新の state に同期（ボタン表示崩れ対策）
+                this._syncMediaButtonsUI();
+                this._updateLocalAvatarOverlay();
                 return;
             }
         }
@@ -1684,6 +1708,9 @@ class SecureVideoChat {
         try {
             this.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
             this.el.localVideo.srcObject = this.localStream;
+            // カメラはOFFスタート（要件1）
+            this.localStream.getVideoTracks().forEach(t => t.enabled = this.isVideoEnabled === true);
+            this.localStream.getAudioTracks().forEach(t => t.enabled = this.isAudioEnabled !== false);
             this.isMediaReady = true;
         } catch (e) {
             console.warn('カメラ/マイクの許可が得られませんでした:', e);
@@ -1691,7 +1718,30 @@ class SecureVideoChat {
             this.isMediaReady = false;
             if (this.el.localVideo) this.el.localVideo.style.display = 'none';
         }
+        // UIを最新の state に同期
+        this._syncMediaButtonsUI();
+        this._updateLocalAvatarOverlay();
         this.updateStatus('オンライン');
+    }
+
+    // マイク/カメラボタンの表示を現在の state に強制同期する（再通話時の表示崩れを防ぐ）
+    _syncMediaButtonsUI() {
+        if (this.el.toggleMicButton) {
+            this.el.toggleMicButton.classList.toggle('active', !this.isAudioEnabled);
+            const icon = this.el.toggleMicButton.querySelector('i');
+            if (icon) icon.className = this.isAudioEnabled ? 'fas fa-microphone' : 'fas fa-microphone-slash';
+        }
+        if (this.el.toggleVideoButton) {
+            this.el.toggleVideoButton.classList.toggle('active', !this.isVideoEnabled);
+            const icon = this.el.toggleVideoButton.querySelector('i');
+            if (icon) icon.className = this.isVideoEnabled ? 'fas fa-video' : 'fas fa-video-slash';
+        }
+        if (this.el.screenShareButton) {
+            this.el.screenShareButton.classList.toggle('sharing', !!this.isScreenSharing);
+            const icon = this.el.screenShareButton.querySelector('i');
+            if (icon) icon.className = this.isScreenSharing ? 'fas fa-stop' : 'fas fa-desktop';
+            this.el.screenShareButton.title = this.isScreenSharing ? '画面共有を停止' : '画面共有';
+        }
     }
 
     // =====================================================
@@ -2520,6 +2570,15 @@ class SecureVideoChat {
                 } catch (_) { }
                 break;
 
+            case 'msg_recall':
+                // メッセージ取り消し通知: { convType: 'dm' | 'group', msgId, convKey?, groupId? }
+                if (this.blockedUsers.has(signal.from)) break;
+                try {
+                    const rcPayload = JSON.parse(decodeURIComponent(signal.signal_data));
+                    this._applyRemoteRecall(signal.from, rcPayload);
+                } catch (_) { }
+                break;
+
             case 'name_changed':
                 // 相手が名前を変えた: ローカルDM履歴のキーを旧名→新名にマージする
                 try {
@@ -2755,6 +2814,11 @@ class SecureVideoChat {
             this.setupAudioBoost(stream);
             this.updateStatus('通話中');
             this.startConnectionQualityMonitoring();
+            // 相手のビデオトラック状態を監視（要件2: カメラOFF時にアバター表示）
+            this._attachRemoteVideoTrackWatcher(stream);
+            // 接続直後に自分の現在のカメラ状態を相手に通知
+            // （DataConnectionが開くのを少し待ってから）
+            setTimeout(() => this._sendMediaStateToPeer(), 600);
         });
 
         call.on('close', () => {
@@ -2765,6 +2829,38 @@ class SecureVideoChat {
         call.peerConnection.oniceconnectionstatechange = () => {
             this.updateConnectionQuality(call.peerConnection.iceConnectionState);
         };
+    }
+
+    // 相手のビデオトラックの mute/unmute/ended を監視し、カメラOFF時にアバター表示を出す
+    _attachRemoteVideoTrackWatcher(stream) {
+        const setRemoteCameraState = (off) => {
+            this.remoteCameraOff = off;
+            this._updateRemoteAvatarOverlay();
+        };
+        const watchTrack = (track) => {
+            if (!track) return;
+            // 初期状態
+            setRemoteCameraState(track.muted === true);
+            track.addEventListener('mute', () => setRemoteCameraState(true));
+            track.addEventListener('unmute', () => setRemoteCameraState(false));
+            track.addEventListener('ended', () => setRemoteCameraState(true));
+        };
+        const videoTracks = stream.getVideoTracks();
+        if (videoTracks.length === 0) {
+            // 相手がカメラ送信していない
+            setRemoteCameraState(true);
+        } else {
+            videoTracks.forEach(watchTrack);
+        }
+        // 新しいトラックが追加された場合（画面共有→カメラ復帰など）も監視
+        stream.addEventListener('addtrack', e => {
+            if (e.track && e.track.kind === 'video') watchTrack(e.track);
+        });
+        stream.addEventListener('removetrack', e => {
+            if (e.track && e.track.kind === 'video') {
+                if (stream.getVideoTracks().length === 0) setRemoteCameraState(true);
+            }
+        });
     }
 
     setupDataConnection() {
@@ -2823,6 +2919,11 @@ class SecureVideoChat {
             this._qualityInterval = null;
         }
 
+        // 画面共有中なら強制終了（カメラトラックに戻す）
+        if (this.isScreenSharing) {
+            try { await this._stopScreenShare(true); } catch (_) { }
+        }
+
         await this.cleanup();
 
         this.el.videoGrid.style.display = 'none';
@@ -2851,6 +2952,24 @@ class SecureVideoChat {
         this.disconnectedBySelf = false;
         this.isDisconnecting = false;
         this.callTargetName = null;
+
+        // カメラ・マイクの状態を初期値（カメラOFF / マイクON）にリセット ＋ 画面共有解除
+        this.isVideoEnabled = false;
+        this.isAudioEnabled = true;
+        this.isScreenSharing = false;
+        this.savedCameraTrack = null;
+        this.remoteCameraOff = false;
+        // 保持しているローカルストリームのトラックもこの状態に合わせる
+        if (this.localStream) {
+            try {
+                this.localStream.getVideoTracks().forEach(t => t.enabled = false);
+                this.localStream.getAudioTracks().forEach(t => t.enabled = true);
+            } catch (_) { }
+        }
+        // ボタン表示を強制同期 → 次回通話時の表示崩れを防ぐ
+        this._syncMediaButtonsUI();
+        this._updateLocalAvatarOverlay();
+        this._updateRemoteAvatarOverlay();
 
         if (this.el.disconnectButton) {
             this.el.disconnectButton.disabled = false;
@@ -2905,6 +3024,14 @@ class SecureVideoChat {
     }
 
     handleReceivedData(data) {
+        if (!data || typeof data !== 'object') return;
+        if (data.type === 'MEDIA_STATE') {
+            // 相手のカメラ/画面共有状態通知
+            // 画面共有中はカメラOFFでも映像があるので、カメラOFFオーバーレイは出さない
+            this.remoteCameraOff = !data.videoOn && !data.screenSharing;
+            this._updateRemoteAvatarOverlay();
+            return;
+        }
         console.log('Received:', data);
     }
 
@@ -3095,6 +3222,240 @@ class SecureVideoChat {
         this.localChatDB[key].push(msg);
         this._saveLocalChatDB();
         return true;
+    }
+
+    // =====================================================
+    // メッセージ取り消し機能
+    // =====================================================
+    // ローカルDB上のメッセージを「取り消し済み」にする
+    _markMessageRecalled(convKey, msgId) {
+        const msgs = this.localChatDB[convKey];
+        if (!msgs) return null;
+        const m = msgs.find(x => x.msgId === msgId);
+        if (!m) return null;
+        m.recalled = true;
+        m.content = '';
+        if (m.file) delete m.file;
+        m.recalledAt = Date.now();
+        this._saveLocalChatDB();
+        return m;
+    }
+
+    // 取り消し操作の起点: バブルがクリックされたら確認モーダルを出す
+    _openRecallConfirm(convType, convKey, msgId) {
+        this._pendingRecall = { convType, convKey, msgId };
+        if (this.el.recallConfirmModal) this.el.recallConfirmModal.classList.add('visible');
+    }
+
+    _closeRecallConfirm() {
+        this._pendingRecall = null;
+        if (this.el.recallConfirmModal) this.el.recallConfirmModal.classList.remove('visible');
+    }
+
+    async _confirmRecall() {
+        const pending = this._pendingRecall;
+        this._closeRecallConfirm();
+        if (!pending) return;
+        const { convType, convKey, msgId } = pending;
+
+        // ローカル更新
+        const updated = this._markMessageRecalled(convKey, msgId);
+        if (!updated) {
+            this.showNotification('エラー', 'メッセージが見つかりませんでした', 'error');
+            return;
+        }
+
+        // 描画更新
+        if (convType === 'dm') {
+            if (this.dmPartner) this._renderDmMessages(this.dmPartner);
+        } else if (convType === 'group') {
+            if (this.currentGroupId) this._renderGroupMessages(this.currentGroupId);
+        }
+
+        // 相手に通知（msg_recall シグナル）
+        try {
+            if (convType === 'dm') {
+                // convKey は dm:A|B 形式。partner を取り出す
+                const parts = convKey.startsWith('dm:') ? convKey.slice(3).split('|') : [];
+                const partner = parts.find(p => p !== this.myName);
+                if (partner) {
+                    const payload = { convType: 'dm', msgId };
+                    await FbAPI.sendSignal(this.token, partner, 'msg_recall', encodeURIComponent(JSON.stringify(payload)));
+                }
+            } else if (convType === 'group') {
+                // convKey は grp:GROUPID
+                const gid = convKey.startsWith('grp:') ? convKey.slice(4) : null;
+                const group = gid ? this.myGroups.find(g => g.id === gid) : null;
+                if (group?.members) {
+                    const payload = { convType: 'group', convKey, groupId: gid, msgId };
+                    const data = encodeURIComponent(JSON.stringify(payload));
+                    for (const member of group.members) {
+                        if (member === this.myName) continue;
+                        FbAPI.sendSignal(this.token, member, 'msg_recall', data).catch(() => { });
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('取り消し通知の送信失敗:', e);
+        }
+    }
+
+    // 相手から msg_recall シグナルを受信したとき
+    _applyRemoteRecall(fromName, payload) {
+        if (!payload || !payload.msgId) return;
+        let convKey = null;
+        let convType = null;
+        if (payload.convType === 'dm') {
+            convKey = this._dmKey(fromName);
+            convType = 'dm';
+        } else if (payload.convType === 'group') {
+            // payload.convKey or payload.groupId から決める
+            if (payload.convKey && payload.convKey.startsWith('grp:')) {
+                convKey = payload.convKey;
+            } else if (payload.groupId) {
+                convKey = this._groupKey(payload.groupId);
+            }
+            convType = 'group';
+            // 自分が所属しているグループか確認
+            if (convKey) {
+                const gid = convKey.slice(4);
+                if (!this.myGroups.some(g => g.id === gid)) return;
+            }
+        }
+        if (!convKey) return;
+
+        // 取り消す対象は「fromName が送ったメッセージ」のみ（なりすまし防止）
+        const msgs = this.localChatDB[convKey];
+        if (!msgs) return;
+        const target = msgs.find(m => m.msgId === payload.msgId);
+        if (!target) return;
+        if (target.from !== fromName) return;
+
+        this._markMessageRecalled(convKey, payload.msgId);
+
+        // 表示中なら再描画
+        if (convType === 'dm') {
+            if (this.el.dmModal?.classList.contains('visible') && this.dmPartner === fromName) {
+                this._renderDmMessages(fromName);
+            }
+        } else if (convType === 'group') {
+            const gid = convKey.slice(4);
+            if (this.el.groupModal?.classList.contains('visible') && this.currentGroupId === gid) {
+                this._renderGroupMessages(gid);
+            }
+        }
+    }
+
+    // 取り消し用コンテキストメニュー（右クリック / 長押し）の設定
+    _setupRecallMenu() {
+        if (this._recallMenuSetup) return;
+        this._recallMenuSetup = true;
+
+        // 自分のメッセージバブルに対するコンテキストメニュー
+        const onContextMenu = (e) => {
+            const bubble = e.target.closest('.chat-msg.mine .chat-msg-bubble');
+            if (!bubble) return;
+            if (bubble.classList.contains('recalled')) return;
+            const msgEl = bubble.closest('.chat-msg');
+            const msgId = msgEl?.dataset?.msgid;
+            const ctxType = msgEl?.dataset?.ctxtype;
+            const ctxKey = msgEl?.dataset?.ctxkey;
+            if (!msgId || !ctxType || !ctxKey) return;
+            e.preventDefault();
+            this._showMsgActionMenu(e.clientX, e.clientY, ctxType, ctxKey, msgId);
+        };
+
+        // 長押し（モバイル）
+        let longPressTimer = null;
+        let longPressTarget = null;
+        const onTouchStart = (e) => {
+            const bubble = e.target.closest('.chat-msg.mine .chat-msg-bubble');
+            if (!bubble) return;
+            if (bubble.classList.contains('recalled')) return;
+            longPressTarget = bubble;
+            longPressTimer = setTimeout(() => {
+                const msgEl = bubble.closest('.chat-msg');
+                const msgId = msgEl?.dataset?.msgid;
+                const ctxType = msgEl?.dataset?.ctxtype;
+                const ctxKey = msgEl?.dataset?.ctxkey;
+                if (!msgId || !ctxType || !ctxKey) return;
+                const rect = bubble.getBoundingClientRect();
+                this._showMsgActionMenu(rect.left, rect.bottom, ctxType, ctxKey, msgId);
+            }, 550);
+        };
+        const cancelLongPress = () => {
+            if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+            longPressTarget = null;
+        };
+
+        // DM・グループ両方に設定
+        [this.el.dmMessages, this.el.groupMessages].forEach(container => {
+            if (!container) return;
+            container.addEventListener('contextmenu', onContextMenu);
+            container.addEventListener('touchstart', onTouchStart, { passive: true });
+            container.addEventListener('touchend', cancelLongPress);
+            container.addEventListener('touchmove', cancelLongPress);
+            container.addEventListener('touchcancel', cancelLongPress);
+        });
+
+        // メニュー外クリックで閉じる
+        document.addEventListener('click', (e) => {
+            if (!this.el.msgActionMenu) return;
+            if (this.el.msgActionMenu.style.display === 'none') return;
+            if (e.target.closest('#msgActionMenu')) return;
+            this._hideMsgActionMenu();
+        });
+
+        // メニューの「取り消す」ボタン
+        if (this.el.msgRecallBtn) {
+            this.el.msgRecallBtn.addEventListener('click', () => {
+                const target = this._currentMsgMenuTarget;
+                this._hideMsgActionMenu();
+                if (target) this._openRecallConfirm(target.convType, target.convKey, target.msgId);
+            });
+        }
+
+        // 確認モーダルのボタン
+        if (this.el.recallConfirmBtn) {
+            this.el.recallConfirmBtn.addEventListener('click', () => this._confirmRecall());
+        }
+        if (this.el.recallCancelBtn) {
+            this.el.recallCancelBtn.addEventListener('click', () => this._closeRecallConfirm());
+        }
+    }
+
+    _showMsgActionMenu(x, y, ctxType, ctxKey, msgId) {
+        if (!this.el.msgActionMenu) return;
+        // ctxType ('dm'/'group') と ctxKey を convKey に正規化
+        let convKey;
+        if (ctxType === 'dm') {
+            convKey = this._dmKey(ctxKey);
+        } else if (ctxType === 'group') {
+            convKey = this._groupKey(ctxKey);
+        } else {
+            return;
+        }
+        this._currentMsgMenuTarget = { convType: ctxType, convKey, msgId };
+
+        const menu = this.el.msgActionMenu;
+        menu.style.display = '';
+        // 一旦表示してサイズ取得 → 画面端調整
+        const menuRect = menu.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        let left = x;
+        let top = y;
+        if (left + menuRect.width + 8 > vw) left = vw - menuRect.width - 8;
+        if (top + menuRect.height + 8 > vh) top = vh - menuRect.height - 8;
+        if (left < 8) left = 8;
+        if (top < 8) top = 8;
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+    }
+
+    _hideMsgActionMenu() {
+        if (this.el.msgActionMenu) this.el.msgActionMenu.style.display = 'none';
+        this._currentMsgMenuTarget = null;
     }
 
     // =====================================================
@@ -4058,7 +4419,13 @@ class SecureVideoChat {
             </div>`;
         }
         let contentHtml = '';
-        if (msg.type === 'file' && msg.file) {
+        let bubbleClass = 'chat-msg-bubble';
+        if (msg.recalled === true) {
+            // 取り消し済みメッセージ
+            bubbleClass += ' recalled';
+            const txt = isMine ? 'あなたがメッセージを取り消しました' : 'メッセージが取り消されました';
+            contentHtml = `<span><i class="fas fa-rotate-left recalled-icon"></i>${this.escapeHtml(txt)}</span>`;
+        } else if (msg.type === 'file' && msg.file) {
             const f = msg.file;
             if (f.type?.startsWith('image/')) {
                 contentHtml = `<img src="${f.data}" alt="${this.escapeHtml(f.name)}" class="chat-img-preview" onclick="this.requestFullscreen?.()">`;
@@ -4082,9 +4449,9 @@ class SecureVideoChat {
                 this._fetchAvatarsFor([fromName]).then(() => this._refreshAvatarsInDom());
             }
         }
-        // 自分が送ったメッセージにだけ既読表示
+        // 自分が送ったメッセージにだけ既読表示（取り消し済みは出さない）
         let readReceiptHtml = '';
-        if (isMine && ctx) {
+        if (isMine && ctx && !msg.recalled) {
             const readBy = Array.isArray(msg.readBy) ? msg.readBy.filter(n => n !== this.myName) : [];
             if (ctx.type === 'dm') {
                 // DM: 相手が読んでいたら「既読」
@@ -4101,11 +4468,15 @@ class SecureVideoChat {
             }
         }
         const msgIdAttr = msg.msgId ? ` data-msgid="${this.escapeHtml(msg.msgId)}"` : '';
-        return `<div class="chat-msg ${isMine ? 'mine' : 'theirs'}"${msgIdAttr}>
+        const ctxTypeAttr = ctx?.type ? ` data-ctxtype="${this.escapeHtml(ctx.type)}"` : '';
+        const ctxKeyAttr = ctx?.type === 'dm' && ctx.partner
+            ? ` data-ctxkey="${this.escapeHtml(ctx.partner)}"`
+            : (ctx?.type === 'group' && ctx.groupId ? ` data-ctxkey="${this.escapeHtml(ctx.groupId)}"` : '');
+        return `<div class="chat-msg ${isMine ? 'mine' : 'theirs'}"${msgIdAttr}${ctxTypeAttr}${ctxKeyAttr}>
             ${avatarHtml}
             <div class="chat-msg-body">
                 ${!isMine ? `<div class="chat-msg-name">${this.escapeHtml(msg.from || '')}</div>` : ''}
-                <div class="chat-msg-bubble">${contentHtml}</div>
+                <div class="${bubbleClass}">${contentHtml}</div>
                 <div class="chat-msg-time">${time}</div>
                 ${readReceiptHtml}
             </div>
@@ -4118,15 +4489,192 @@ class SecureVideoChat {
     toggleAudio() {
         this.isAudioEnabled = !this.isAudioEnabled;
         if (this.localStream) this.localStream.getAudioTracks().forEach(t => t.enabled = this.isAudioEnabled);
-        this.el.toggleMicButton.classList.toggle('active', !this.isAudioEnabled);
-        this.el.toggleMicButton.querySelector('i').className = this.isAudioEnabled ? 'fas fa-microphone' : 'fas fa-microphone-slash';
+        this._syncMediaButtonsUI();
     }
 
     toggleVideo() {
+        // 画面共有中はカメラON/OFFトグルを無効化
+        if (this.isScreenSharing) {
+            this.showNotification('通知', '画面共有中はカメラを切り替えられません', 'warning');
+            return;
+        }
         this.isVideoEnabled = !this.isVideoEnabled;
         if (this.localStream) this.localStream.getVideoTracks().forEach(t => t.enabled = this.isVideoEnabled);
-        this.el.toggleVideoButton.classList.toggle('active', !this.isVideoEnabled);
-        this.el.toggleVideoButton.querySelector('i').className = this.isVideoEnabled ? 'fas fa-video' : 'fas fa-video-slash';
+        this._syncMediaButtonsUI();
+        this._updateLocalAvatarOverlay();
+        // 相手にカメラ状態を通知（要件2: 相手画面のオーバーレイ切替に使う）
+        this._sendMediaStateToPeer();
+    }
+
+    // 自分のカメラ/画面共有状態を相手に通知
+    async _sendMediaStateToPeer() {
+        if (!this.dataConnection || this.dataConnection.open === false) return;
+        const payload = {
+            type: 'MEDIA_STATE',
+            videoOn: this.isVideoEnabled,
+            screenSharing: this.isScreenSharing,
+            // アバター表示用に自分の名前も送る（受信側は avatarCache から URL を引く）
+            from: this.myName
+        };
+        try {
+            if (this.encryptionKey) {
+                const enc = await CryptoUtil.encrypt(this.encryptionKey, new TextEncoder().encode(JSON.stringify(payload)));
+                this.dataConnection.send({ iv: enc.iv, encryptedData: enc.encryptedData });
+            } else {
+                this.dataConnection.send(payload);
+            }
+        } catch (e) {
+            console.warn('media state 送信失敗:', e);
+        }
+    }
+
+    // 自分のカメラOFF時、ローカル映像にアバターオーバーレイを出す
+    _updateLocalAvatarOverlay() {
+        if (!this.el.localAvatarOverlay) return;
+        // 画面共有中はオーバーレイ非表示
+        const showOverlay = !this.isVideoEnabled && !this.isScreenSharing;
+        this.el.localAvatarOverlay.style.display = showOverlay ? '' : 'none';
+        if (showOverlay) {
+            this._renderAvatarCircle(this.el.localAvatarCircle, this.el.localAvatarInitial, this.myName);
+        }
+    }
+
+    // 相手のカメラOFF時、リモート映像にアバターオーバーレイを出す
+    _updateRemoteAvatarOverlay() {
+        if (!this.el.remoteAvatarOverlay) return;
+        const partner = this.callTargetName || this.el.remoteName?.textContent || '';
+        // 通話中で、相手のカメラがOFFのとき表示
+        const showOverlay = !!this.currentCall && this.remoteCameraOff === true;
+        this.el.remoteAvatarOverlay.style.display = showOverlay ? '' : 'none';
+        if (showOverlay && partner) {
+            this._renderAvatarCircle(this.el.remoteAvatarCircle, this.el.remoteAvatarInitial, partner);
+            // キャッシュにまだ無ければ取得
+            if (!this.avatarCache[partner]) {
+                this._fetchAvatarsFor([partner]).then(() => {
+                    if (this.remoteCameraOff && this.currentCall) {
+                        this._renderAvatarCircle(this.el.remoteAvatarCircle, this.el.remoteAvatarInitial, partner);
+                    }
+                });
+            }
+        }
+    }
+
+    _renderAvatarCircle(circleEl, initialEl, name) {
+        if (!circleEl) return;
+        const avUrl = name ? this.avatarCache[name] : null;
+        if (avUrl) {
+            circleEl.classList.add('has-image');
+            circleEl.style.backgroundImage = `url('${avUrl}')`;
+            if (initialEl) initialEl.textContent = '';
+        } else {
+            circleEl.classList.remove('has-image');
+            circleEl.style.backgroundImage = '';
+            if (initialEl) initialEl.textContent = (name || '?').charAt(0).toUpperCase();
+        }
+    }
+
+    // =====================================================
+    // 画面共有
+    // =====================================================
+    async toggleScreenShare() {
+        if (!this.currentCall || !this.currentCall.peerConnection) {
+            this.showNotification('通知', '通話中のみ画面共有できます', 'warning');
+            return;
+        }
+        if (this.isScreenSharing) {
+            await this._stopScreenShare();
+        } else {
+            await this._startScreenShare();
+        }
+    }
+
+    async _startScreenShare() {
+        if (!navigator.mediaDevices?.getDisplayMedia) {
+            this.showNotification('エラー', 'このブラウザは画面共有に対応していません', 'error');
+            return;
+        }
+        let displayStream;
+        try {
+            displayStream = await navigator.mediaDevices.getDisplayMedia({
+                video: { frameRate: { ideal: 15, max: 30 } },
+                audio: false
+            });
+        } catch (e) {
+            // ユーザーがキャンセル/拒否した
+            console.warn('画面共有キャンセル:', e);
+            return;
+        }
+        const screenTrack = displayStream.getVideoTracks()[0];
+        if (!screenTrack) {
+            this.showNotification('エラー', '画面トラックを取得できませんでした', 'error');
+            return;
+        }
+        // RTCPeerConnection のビデオセンダーを差し替え
+        const pc = this.currentCall.peerConnection;
+        const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (!videoSender) {
+            // 元々ビデオトラックを送っていなかった場合は追加
+            try {
+                pc.addTrack(screenTrack, displayStream);
+            } catch (e) {
+                console.warn('addTrack失敗:', e);
+            }
+        } else {
+            try { await videoSender.replaceTrack(screenTrack); }
+            catch (e) {
+                console.warn('replaceTrack失敗:', e);
+                this.showNotification('エラー', '画面共有の開始に失敗しました', 'error');
+                screenTrack.stop();
+                return;
+            }
+        }
+        // 元のカメラトラックを退避（停止時に戻す）
+        this.savedCameraTrack = this.localStream?.getVideoTracks()[0] || null;
+        // ローカルプレビューも画面に切り替え
+        if (this.el.localVideo) {
+            this.el.localVideo.srcObject = displayStream;
+        }
+        this._screenStream = displayStream;
+        this.isScreenSharing = true;
+        // ユーザがOSのUIから「共有を停止」を押した場合
+        screenTrack.addEventListener('ended', () => {
+            if (this.isScreenSharing) this._stopScreenShare();
+        });
+        this._syncMediaButtonsUI();
+        this._updateLocalAvatarOverlay();
+        // 相手に画面共有開始を通知
+        this._sendMediaStateToPeer();
+    }
+
+    async _stopScreenShare(isCallEnding = false) {
+        // 画面トラック停止
+        if (this._screenStream) {
+            try { this._screenStream.getTracks().forEach(t => t.stop()); } catch (_) { }
+            this._screenStream = null;
+        }
+        this.isScreenSharing = false;
+
+        // 通話が継続中ならカメラトラックに戻す
+        if (!isCallEnding && this.currentCall && this.currentCall.peerConnection) {
+            const pc = this.currentCall.peerConnection;
+            const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+            const cameraTrack = this.savedCameraTrack && this.savedCameraTrack.readyState === 'live'
+                ? this.savedCameraTrack
+                : (this.localStream?.getVideoTracks()[0] || null);
+            if (videoSender && cameraTrack) {
+                try { await videoSender.replaceTrack(cameraTrack); } catch (e) { console.warn('カメラ復帰失敗:', e); }
+                // カメラトラックの enabled を isVideoEnabled に合わせる
+                cameraTrack.enabled = this.isVideoEnabled === true;
+            }
+            // ローカルプレビューもカメラに戻す
+            if (this.el.localVideo && this.localStream) {
+                this.el.localVideo.srcObject = this.localStream;
+            }
+        }
+        this.savedCameraTrack = null;
+        this._syncMediaButtonsUI();
+        this._updateLocalAvatarOverlay();
+        if (!isCallEnding) this._sendMediaStateToPeer();
     }
 
     toggleVolumeControl() {
