@@ -727,11 +727,52 @@ button:disabled {
     text-shadow: 0 1px 2px rgba(0,0,0,0.5);
 }
 
-/* 通話終了ボタン */
+/* 通話中コントロールバー（メッシュ通話含む） */
 .call-controls {
     display: flex;
     justify-content: center;
+    align-items: center;
+    gap: 0.75rem;
     flex-shrink: 0;
+    padding: 0.85rem 1rem;
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.04);
+    flex-wrap: wrap;
+}
+
+/* .call-controls 内の .control-button は通話バー仕様（白基調） */
+.call-controls .control-button {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background-color: var(--background-color);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.05rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease, transform 0.15s ease, color 0.15s ease;
+}
+
+.call-controls .control-button:hover {
+    background-color: #e2e8f0;
+    transform: translateY(-1px);
+}
+
+.call-controls .control-button.active {
+    background-color: var(--danger-color);
+    color: #fff;
+    border-color: var(--danger-color);
+}
+
+.call-controls .control-button.sharing {
+    background-color: var(--success-color);
+    color: #fff;
+    border-color: var(--success-color);
 }
 
 .end-call-btn {
@@ -1745,6 +1786,23 @@ button:disabled {
     justify-content: center;
     padding: 0 3px;
     line-height: 1;
+}
+
+/* 通話進行中などの「数字なしドット表示」 */
+.badge.badge-dot {
+    min-width: 10px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    padding: 0;
+    background: var(--success-color);
+    box-shadow: 0 0 0 2px var(--surface-color), 0 0 8px rgba(22, 163, 74, 0.5);
+    animation: badgeDotPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes badgeDotPulse {
+    0%, 100% { box-shadow: 0 0 0 2px var(--surface-color), 0 0 8px rgba(22, 163, 74, 0.5); }
+    50% { box-shadow: 0 0 0 2px var(--surface-color), 0 0 12px rgba(22, 163, 74, 0.8); }
 }
 
 /* =====================================================
@@ -2972,4 +3030,854 @@ button:disabled {
 /* 自分のメッセージにホバーで取り消しヒントカーソル */
 .chat-msg.mine .chat-msg-bubble:not(.recalled) {
     cursor: context-menu;
+}
+
+/* ============================================================
+   ============================================================
+                  メッシュ通話関連スタイル
+   ============================================================
+   ============================================================ */
+
+/* ==== メッシュビデオグリッド ==== */
+.video-mesh-grid {
+    flex: 1;
+    width: 100%;
+    height: 100%;
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    background: var(--background-color);
+    overflow: hidden;
+    box-sizing: border-box;
+    min-height: 0;
+    min-width: 0;
+}
+
+/* 人数別レイアウト */
+.video-mesh-grid[data-count="0"] { display: none; }
+.video-mesh-grid[data-count="1"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    place-items: center;
+    justify-content: center;
+}
+.video-mesh-grid[data-count="1"] .mesh-tile {
+    width: min(100%, 900px);
+    max-height: 100%;
+    aspect-ratio: 16 / 9;
+}
+.video-mesh-grid[data-count="2"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(0, 1fr);
+}
+.video-mesh-grid[data-count="3"],
+.video-mesh-grid[data-count="4"] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.video-mesh-grid[data-count="5"],
+.video-mesh-grid[data-count="6"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+}
+.video-mesh-grid[data-count="7"],
+.video-mesh-grid[data-count="8"],
+.video-mesh-grid[data-count="9"] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+}
+/* 10人以上は4列 */
+.video-mesh-grid:not([data-count="0"]):not([data-count="1"]):not([data-count="2"]):not([data-count="3"]):not([data-count="4"]):not([data-count="5"]):not([data-count="6"]):not([data-count="7"]):not([data-count="8"]):not([data-count="9"]) {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+}
+
+/* ===== ピン留めモード（Zoom風レイアウト）===== */
+.video-mesh-grid[data-pinned="true"] {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 200px) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
+    grid-auto-rows: auto !important;
+}
+
+/* ピン留めされたタイル: 左側の大きい領域に */
+.video-mesh-grid[data-pinned="true"] .mesh-tile.pinned {
+    grid-row: 1 / -1;
+    grid-column: 1;
+    width: 100%;
+    height: 100%;
+    max-height: 100%;
+    aspect-ratio: auto;
+}
+
+/* ピン留め時、ピン留め以外のタイルは右側の縦並びサイドバーへ */
+.video-mesh-grid[data-pinned="true"] .mesh-tile:not(.pinned) {
+    grid-column: 2;
+    width: 200px;
+    height: auto;
+    aspect-ratio: 16 / 9;
+    align-self: start;
+}
+
+.video-mesh-grid[data-pinned="true"] {
+    grid-template-rows: none !important;
+    grid-template-columns: minmax(0, 1fr) 210px !important;
+}
+
+/* ピン留めサブタイルが画面に収まるように、右カラムを縦スクロール可能に */
+.video-mesh-grid[data-pinned="true"] .mesh-tile:not(.pinned) {
+    grid-column: 2;
+}
+
+/* タイル */
+.mesh-tile {
+    position: relative;
+    background: #0f172a;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid var(--border-color);
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    height: 100%;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    transition: border-color 0.2s ease, transform 0.2s ease;
+}
+
+.mesh-tile.self {
+    border-color: var(--primary-color);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+}
+
+.mesh-tile.pinned {
+    border-color: #f59e0b;
+    box-shadow: 0 4px 16px rgba(245, 158, 11, 0.35);
+}
+
+.mesh-tile video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #0f172a;
+    display: block;
+    transition: opacity 0.2s ease;
+}
+
+/* ピン留めボタン（タイル右上、通常非表示・ホバーで表示） */
+.mesh-tile-pin-btn {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+    font-size: 0.78rem;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 2;
+    transition: background 0.15s ease;
+}
+
+.mesh-tile:hover .mesh-tile-pin-btn,
+.mesh-tile.pinned .mesh-tile-pin-btn {
+    display: inline-flex;
+}
+
+.mesh-tile-pin-btn:hover {
+    background: rgba(0, 0, 0, 0.75);
+}
+
+.mesh-tile.pinned .mesh-tile-pin-btn {
+    background: #f59e0b;
+}
+
+.mesh-tile.pinned .mesh-tile-pin-btn:hover {
+    background: #d97706;
+}
+
+/* ピン留めコンテキストメニュー */
+.mesh-pin-menu {
+    position: fixed;
+    display: none;
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18);
+    padding: 4px;
+    z-index: 10000;
+    min-width: 200px;
+}
+
+.mesh-pin-menu-item {
+    width: 100%;
+    background: transparent;
+    border: none;
+    padding: 0.6rem 0.8rem;
+    text-align: left;
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    cursor: pointer;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.mesh-pin-menu-item:hover {
+    background: var(--background-color);
+}
+
+.mesh-pin-menu-item i {
+    color: var(--primary-color);
+    font-size: 0.85rem;
+}
+
+/* 自分の映像は鏡像反転 */
+.mesh-tile.self video {
+    transform: scaleX(-1);
+}
+
+/* タイル下部のネームラベル */
+.mesh-tile-label {
+    position: absolute;
+    bottom: 8px;
+    left: 8px;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    padding: 5px 12px;
+    border-radius: 8px;
+    color: #fff;
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: calc(100% - 16px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.mesh-tile-name {
+    font-weight: 600;
+}
+
+.mesh-tile-you {
+    font-size: 0.75rem;
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* タイル右上のステータスアイコン */
+.mesh-tile-status {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: flex;
+    gap: 6px;
+}
+
+.mesh-status-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+}
+
+.mesh-status-icon.muted {
+    background: var(--danger-color);
+}
+
+/* カメラOFFのときに見せるオーバーレイ */
+.mesh-no-video {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1;
+}
+
+.mesh-no-video-circle {
+    width: clamp(60px, 30%, 130px);
+    aspect-ratio: 1 / 1;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--primary-color), #1d4ed8);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: clamp(1.6rem, 6vw, 3rem);
+    font-weight: 700;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+    text-transform: uppercase;
+}
+
+.mesh-no-video-circle img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+/* ==== 通話画面の招待ボタン ==== */
+.invite-mesh-btn {
+    background: linear-gradient(135deg, var(--primary-color), #1d4ed8);
+    color: #fff;
+    border: none;
+    padding: 0.7rem 1.2rem;
+    border-radius: 10px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+    margin-right: 0.5rem;
+}
+
+.invite-mesh-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(37, 99, 235, 0.35);
+    filter: brightness(1.05);
+}
+
+.invite-mesh-btn:active {
+    transform: translateY(0);
+}
+
+/* ==== グループチャットの通話開始ボタン ==== */
+.group-call-btn {
+    background: linear-gradient(135deg, var(--success-color), #15803d);
+    color: #fff !important;
+    box-shadow: 0 2px 8px rgba(22, 163, 74, 0.25);
+    transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+}
+
+.group-call-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(22, 163, 74, 0.35);
+    filter: brightness(1.08);
+}
+
+.group-call-btn i {
+    color: #fff !important;
+}
+
+/* 進行中通話への「参加」モード（青系） */
+.group-call-btn.joining {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+    animation: groupCallBtnJoinPulse 1.8s ease-in-out infinite;
+}
+
+.group-call-btn.joining:hover:not(:disabled) {
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.45);
+}
+
+@keyframes groupCallBtnJoinPulse {
+    0%, 100% { box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3); }
+    50% { box-shadow: 0 2px 14px rgba(37, 99, 235, 0.55); }
+}
+
+/* 通話中（参加済み）→ 無効化 */
+.group-call-btn:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+    animation: none;
+}
+
+/* ==== 招待モーダル ==== */
+.mesh-invite-modal-content {
+    max-width: 440px;
+    width: 90%;
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    max-height: 80vh;
+}
+
+.mesh-invite-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--surface-color);
+}
+
+.mesh-invite-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.mesh-invite-header h2 i {
+    color: var(--primary-color);
+}
+
+.mesh-invite-desc {
+    padding: 0.75rem 1.25rem 0.5rem;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin: 0;
+    background: var(--surface-color);
+}
+
+.mesh-invite-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 0.5rem 1rem 1rem;
+    min-height: 200px;
+    max-height: calc(80vh - 140px);
+    background: var(--surface-color);
+}
+
+.mesh-invite-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.65rem 0.5rem;
+    border-bottom: 1px solid var(--border-color);
+    transition: background 0.15s ease;
+}
+
+.mesh-invite-row:last-child {
+    border-bottom: none;
+}
+
+.mesh-invite-row:hover {
+    background: var(--background-color);
+}
+
+.mesh-invite-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 1.5px solid var(--border-color);
+}
+
+.mesh-invite-avatar-letter {
+    background: linear-gradient(135deg, var(--primary-color), #1d4ed8);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 1rem;
+    text-transform: uppercase;
+}
+
+.mesh-invite-name {
+    flex: 1;
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.mesh-invite-btn {
+    padding: 0.45rem 0.9rem;
+    border-radius: 8px;
+    background: var(--primary-color);
+    color: #fff;
+    border: none;
+    font-size: 0.8rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    transition: transform 0.15s ease, filter 0.15s ease;
+    flex-shrink: 0;
+    min-width: 90px;
+    justify-content: center;
+}
+
+.mesh-invite-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    filter: brightness(1.08);
+}
+
+.mesh-invite-btn:disabled {
+    background: var(--text-secondary);
+    cursor: not-allowed;
+    opacity: 0.7;
+}
+
+.mesh-invite-empty {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: var(--text-secondary);
+}
+
+.mesh-invite-empty i {
+    font-size: 2.5rem;
+    opacity: 0.4;
+    margin-bottom: 0.5rem;
+    display: block;
+}
+
+.mesh-invite-empty p {
+    margin: 0.5rem 0 0;
+    font-size: 0.9rem;
+}
+
+/* ==== モバイル対応 ==== */
+@media (max-width: 640px) {
+    .video-mesh-grid {
+        padding: 6px;
+        gap: 4px;
+    }
+    .video-mesh-grid[data-count="1"] {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
+    }
+    /* 2人以上は1列で縦並びにする */
+    .video-mesh-grid[data-count="2"],
+    .video-mesh-grid[data-count="3"],
+    .video-mesh-grid[data-count="4"],
+    .video-mesh-grid[data-count="5"],
+    .video-mesh-grid[data-count="6"],
+    .video-mesh-grid[data-count="7"],
+    .video-mesh-grid[data-count="8"],
+    .video-mesh-grid[data-count="9"] {
+        grid-template-columns: minmax(0, 1fr) !important;
+        grid-template-rows: none !important;
+        grid-auto-rows: minmax(120px, 1fr);
+        overflow-y: auto;
+    }
+    /* ピン留め時のモバイル: メイン上 + サブ下に横スクロール */
+    .video-mesh-grid[data-pinned="true"] {
+        grid-template-columns: minmax(0, 1fr) !important;
+        grid-template-rows: minmax(0, 1fr) 90px !important;
+        grid-auto-rows: auto !important;
+    }
+    .video-mesh-grid[data-pinned="true"] .mesh-tile.pinned {
+        grid-row: 1;
+        grid-column: 1;
+        width: 100%;
+        height: 100%;
+    }
+    .video-mesh-grid[data-pinned="true"] .mesh-tile:not(.pinned) {
+        grid-row: 2;
+        grid-column: 1;
+        width: 140px;
+        height: 90px;
+        aspect-ratio: auto;
+        display: inline-block;
+    }
+    .video-mesh-grid[data-pinned="true"] {
+        /* サブ行は横スクロール */
+        overflow-x: auto;
+    }
+    .mesh-tile {
+        min-height: 100px;
+        border-radius: 8px;
+    }
+    .mesh-tile-label {
+        font-size: 0.75rem;
+        padding: 4px 8px;
+        bottom: 6px;
+        left: 6px;
+    }
+    .mesh-status-icon {
+        width: 24px;
+        height: 24px;
+        font-size: 0.7rem;
+    }
+    .mesh-tile-status {
+        top: 6px;
+        right: 6px;
+        gap: 4px;
+    }
+    .invite-mesh-btn {
+        padding: 0.55rem 0.9rem;
+        font-size: 0.8rem;
+    }
+    .mesh-invite-modal-content {
+        width: 95%;
+        max-height: 85vh;
+    }
+    .mesh-tile-pin-btn {
+        display: inline-flex; /* モバイルではホバーが効かないので常時表示 */
+        width: 26px;
+        height: 26px;
+    }
+}
+
+/* ============================================================
+   進行中グループ通話バナー
+   ============================================================ */
+#groupCallBanner {
+    padding: 8px 16px;
+    background: transparent;
+    flex-shrink: 0;
+}
+
+.group-call-banner-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: linear-gradient(135deg, var(--success-color), #15803d);
+    color: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 12px rgba(22, 163, 74, 0.25);
+    font-size: 0.9rem;
+    animation: groupCallBannerPulse 2s ease-in-out infinite;
+}
+
+.group-call-banner-inner.active {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25);
+    animation: none;
+}
+
+@keyframes groupCallBannerPulse {
+    0%, 100% { box-shadow: 0 4px 12px rgba(22, 163, 74, 0.25); }
+    50% { box-shadow: 0 4px 18px rgba(22, 163, 74, 0.45); }
+}
+
+.group-call-banner-inner i {
+    font-size: 1.1rem;
+}
+
+.group-call-banner-text {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.group-call-join-btn {
+    background: #fff;
+    color: var(--success-color);
+    border: none;
+    padding: 0.45rem 1rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    flex-shrink: 0;
+}
+
+.group-call-join-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+}
+
+/* グループ一覧の「通話中」インジケータ */
+.group-call-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.5rem;
+    background: var(--success-color);
+    color: #fff;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    margin-left: 0.4rem;
+    flex-shrink: 0;
+    animation: groupCallIndicatorBlink 1.6s ease-in-out infinite;
+}
+
+.group-call-indicator i {
+    font-size: 0.65rem;
+}
+
+@keyframes groupCallIndicatorBlink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+@media (max-width: 640px) {
+    .group-call-banner-inner {
+        padding: 10px 12px;
+        font-size: 0.82rem;
+        gap: 8px;
+    }
+    .group-call-join-btn {
+        padding: 0.4rem 0.7rem;
+        font-size: 0.78rem;
+    }
+}
+
+/* 通話バナーのリセットボタン（ゾンビ通話復旧用） */
+.group-call-reset-btn {
+    background: rgba(255, 255, 255, 0.18);
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+.group-call-reset-btn:hover {
+    background: rgba(255, 255, 255, 0.3);
+    transform: translateY(-1px);
+}
+
+.group-call-reset-btn:active {
+    transform: translateY(0);
+}
+
+/* ============================================================
+   ユーザー名予測候補ポップアップ
+   ============================================================ */
+.user-suggest-popup {
+    position: absolute;
+    z-index: 20000;
+    background: var(--surface-color);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 8px rgba(0, 0, 0, 0.06);
+    overflow: hidden;
+    max-height: 320px;
+    overflow-y: auto;
+    min-width: 240px;
+    animation: userSuggestFadeIn 0.12s ease;
+}
+
+@keyframes userSuggestFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.user-suggest-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.85rem;
+    cursor: pointer;
+    transition: background 0.12s ease;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.user-suggest-item:last-child {
+    border-bottom: none;
+}
+
+.user-suggest-item:hover {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.06), rgba(37, 99, 235, 0.02));
+}
+
+.user-suggest-avatar {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 1.5px solid var(--border-color);
+    background: var(--background-color);
+}
+
+.user-suggest-avatar-letter {
+    background: linear-gradient(135deg, var(--primary-color), #1d4ed8);
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    border-color: transparent;
+}
+
+.user-suggest-name {
+    flex: 1;
+    color: var(--text-primary);
+    font-size: 0.92rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.user-suggest-name mark {
+    background: rgba(245, 158, 11, 0.28);
+    color: inherit;
+    padding: 0 2px;
+    border-radius: 3px;
+    font-weight: 600;
+}
+
+.user-suggest-tag {
+    font-size: 0.65rem;
+    padding: 2px 7px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.user-suggest-tag.friend {
+    background: rgba(22, 163, 74, 0.12);
+    color: #15803d;
+}
+
+.user-suggest-tag.known {
+    background: rgba(100, 116, 139, 0.12);
+    color: var(--text-secondary);
+}
+
+.user-suggest-empty {
+    padding: 1rem 0.85rem;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+@media (max-width: 640px) {
+    .user-suggest-popup {
+        max-height: 50vh;
+        min-width: 180px;
+    }
+    .user-suggest-item {
+        padding: 0.65rem 0.8rem;
+    }
+    .user-suggest-avatar {
+        width: 32px;
+        height: 32px;
+    }
+    .user-suggest-name {
+        font-size: 0.95rem;
+    }
 }

@@ -216,11 +216,10 @@
                         <p class="waiting-title">LinkUpへようこそ！</p>
                     </div>
 
-                    <!-- ビデオグリッド -->
+                    <!-- 旧1対1ビデオグリッド（メッシュ統合後は使わないが、互換性のため要素は残す） -->
                     <div id="videoGrid" class="video-grid" style="display:none">
-                        <div class="video-container local">
+                        <div class="video-container local" style="display:none">
                             <video id="localVideo" autoplay muted playsinline></video>
-                            <!-- 自分のカメラOFF時に表示するアバター -->
                             <div id="localAvatarOverlay" class="video-avatar-overlay" style="display:none">
                                 <div id="localAvatarCircle" class="video-avatar-circle">
                                     <span id="localAvatarInitial">?</span>
@@ -228,23 +227,10 @@
                             </div>
                             <div class="video-overlay">
                                 <span class="participant-name" id="localName">あなた</span>
-                                <div class="video-controls">
-                                    <button id="toggleMicButton" class="control-button" title="マイク切替">
-                                        <i class="fas fa-microphone"></i>
-                                    </button>
-                                    <button id="toggleVideoButton" class="control-button" title="カメラ切替">
-                                        <i class="fas fa-video"></i>
-                                    </button>
-                                    <button id="screenShareButton" class="control-button" title="画面共有">
-                                        <i class="fas fa-desktop"></i>
-                                    </button>
-                                </div>
                             </div>
                         </div>
-
-                        <div class="video-container remote">
+                        <div class="video-container remote" style="display:none">
                             <video id="remoteVideo" autoplay playsinline></video>
-                            <!-- 相手のカメラOFF時に表示するアバター -->
                             <div id="remoteAvatarOverlay" class="video-avatar-overlay" style="display:none">
                                 <div id="remoteAvatarCircle" class="video-avatar-circle">
                                     <span id="remoteAvatarInitial">?</span>
@@ -252,14 +238,6 @@
                             </div>
                             <div class="video-overlay">
                                 <span class="participant-name" id="remoteName">相手</span>
-                                <div class="video-controls">
-                                    <div class="connection-quality">
-                                        <span id="connectionQuality">待機中...</span>
-                                    </div>
-                                    <button id="volumeControlButton" class="control-button" title="音量">
-                                        <i class="fas fa-volume-up"></i>
-                                    </button>
-                                </div>
                             </div>
                             <div class="volume-slider-container">
                                 <div class="volume-label">
@@ -271,13 +249,37 @@
                         </div>
                     </div>
 
-                    <!-- 通話中の切断ボタン -->
+                    <!-- メッシュ通話用のビデオグリッド -->
+                    <div id="videoMeshGrid" class="video-mesh-grid" data-count="0" style="display:none"></div>
+
+                    <!-- 通話中のコントロールバー -->
                     <div id="callControls" class="call-controls" style="display:none">
+                        <button id="toggleMicButton" class="control-button" title="マイク切替">
+                            <i class="fas fa-microphone"></i>
+                        </button>
+                        <button id="toggleVideoButton" class="control-button" title="カメラ切替">
+                            <i class="fas fa-video"></i>
+                        </button>
+                        <button id="screenShareButton" class="control-button" title="画面共有">
+                            <i class="fas fa-desktop"></i>
+                        </button>
+                        <!-- 互換: 旧コードが参照するが現状非表示 -->
+                        <button id="volumeControlButton" class="control-button" title="音量" style="display:none">
+                            <i class="fas fa-volume-up"></i>
+                        </button>
+                        <!-- フレンド招待ボタン -->
+                        <button id="meshInviteBtn" class="invite-mesh-btn" title="フレンドを招待" style="display:none">
+                            <i class="fas fa-user-plus"></i>
+                            招待
+                        </button>
                         <button id="disconnectButton" class="end-call-btn">
                             <i class="fas fa-phone-slash"></i>
                             通話を終了
                         </button>
                     </div>
+
+                    <!-- 互換: 接続品質 (現状未使用だが旧コードが参照する) -->
+                    <span id="connectionQuality" style="display:none"></span>
                 </section>
             </div>
         </main>
@@ -425,7 +427,7 @@
         <div id="addFriendPanel" class="friend-panel" style="display:none">
             <p class="friend-add-desc">相手の本名を入力してフレンド申請を送ります。</p>
             <div class="friend-add-row">
-                <input type="text" id="friendSearchInput" placeholder="本名を入力" maxlength="20">
+                <input type="text" id="friendSearchInput" placeholder="本名を入力" maxlength="20" autocomplete="off" data-suggest-users="true">
                 <button id="sendFriendRequestBtn" class="friend-add-btn">
                     <i class="fas fa-user-plus"></i> 申請を送る
                 </button>
@@ -436,7 +438,7 @@
         <div id="blockPanel" class="friend-panel" style="display:none">
             <p class="friend-add-desc">ブロックすると通話申請・メッセージを受け取りません。</p>
             <div class="friend-add-row">
-                <input type="text" id="blockSearchInput" placeholder="ブロックする本名を入力" maxlength="20">
+                <input type="text" id="blockSearchInput" placeholder="ブロックする本名を入力" maxlength="20" autocomplete="off" data-suggest-users="true">
                 <button id="addBlockBtn" class="friend-add-btn" style="background:var(--danger-color)">
                     <i class="fas fa-ban"></i> ブロック
                 </button>
@@ -516,7 +518,7 @@
                 </div>
                 <div class="settings-input-group">
                     <input type="password" id="settingsCurrentPw" placeholder="現在のパスワード" autocomplete="current-password">
-                    <input type="password" id="settingsNewPw" placeholder="新しいパスワード（英数字4文字以上）" autocomplete="new-password">
+                    <input type="password" id="settingsNewPw" placeholder="新しいパスワード(英数字4文字以上)" autocomplete="new-password">
                     <input type="password" id="settingsNewPwConfirm" placeholder="新しいパスワード（確認）" autocomplete="new-password">
                     <button id="settingsChangePwBtn" class="settings-action-btn">
                         <i class="fas fa-check"></i> 変更する
@@ -662,11 +664,17 @@
                 <button id="groupBackBtn" class="dm-back-btn"><i class="fas fa-arrow-left"></i> 戻る</button>
                 <span id="groupChatName" class="group-chat-name"></span>
                 <div class="group-chat-actions">
+                    <!-- グループ通話開始ボタン -->
+                    <button id="groupCallBtn" class="icon-button group-call-btn" title="グループ通話を開始">
+                        <i class="fas fa-phone"></i>
+                    </button>
                     <button id="groupSettingsBtn" class="icon-button" title="グループ設定"><i class="fas fa-cog"></i></button>
                     <button id="inviteGroupBtn" class="icon-button" title="招待"><i class="fas fa-user-plus"></i></button>
                     <button id="leaveGroupBtn" class="icon-button leave-btn" title="退出"><i class="fas fa-door-open"></i></button>
                 </div>
             </div>
+            <!-- 進行中のグループ通話バナー（参加可能） -->
+            <div id="groupCallBanner" style="display:none"></div>
             <div id="groupMessages" class="chat-messages"></div>
             <div class="chat-input-area">
                 <label class="file-attach-btn" title="ファイル添付">
@@ -770,7 +778,7 @@
         </h2>
         <div class="form-group">
             <label>招待する本名</label>
-            <input type="text" id="inviteTargetName" placeholder="本名を入力" maxlength="20">
+            <input type="text" id="inviteTargetName" placeholder="本名を入力" maxlength="20" autocomplete="off" data-suggest-users="true">
         </div>
         <p class="auth-error" id="inviteGroupError"></p>
         <div style="display:flex;gap:0.5rem;margin-top:1rem">
@@ -810,7 +818,7 @@
             <i class="fas fa-comment-medical" style="color:var(--primary-color)"></i> 新規DM
         </h2>
         <p style="color:var(--text-secondary);margin:0.5rem 0 1rem">相手のユーザー名を入力してください</p>
-        <input type="text" id="newDmTargetName" placeholder="ユーザー名" maxlength="40" style="width:100%;padding:0.75rem;border:1px solid var(--border-color);border-radius:8px;font-size:1rem;box-sizing:border-box">
+        <input type="text" id="newDmTargetName" placeholder="ユーザー名" maxlength="40" autocomplete="off" data-suggest-users="true" style="width:100%;padding:0.75rem;border:1px solid var(--border-color);border-radius:8px;font-size:1rem;box-sizing:border-box">
         <p id="newDmError" style="color:var(--danger-color);font-size:0.85rem;margin:0.5rem 0;min-height:1.2em"></p>
         <div style="display:flex;gap:0.75rem;margin-top:1rem">
             <button id="newDmCancelBtn" class="reject-btn" style="flex:1">キャンセル</button>
@@ -846,6 +854,21 @@
         </div>
     </div>
 </div>
+
+<!-- ▼▼▼ メッシュ通話: フレンド招待モーダル（新規追加） ▼▼▼ -->
+<div id="meshInviteModal" class="modal">
+    <div class="modal-content mesh-invite-modal-content">
+        <div class="mesh-invite-header">
+            <h2><i class="fas fa-user-plus"></i> 通話に招待</h2>
+            <button id="meshInviteCloseBtn" class="icon-button"><i class="fas fa-times"></i></button>
+        </div>
+        <p class="mesh-invite-desc">フレンドの中から、まだ参加していない人を招待できます。</p>
+        <div id="meshInviteList" class="mesh-invite-list"></div>
+    </div>
+</div>
+
+<!-- 入力欄のユーザー名予測候補ポップアップ（カスタム） -->
+<div id="userSuggestionPopup" class="user-suggest-popup" style="display:none"></div>
 
 <script src="app.js"></script>
 </body>

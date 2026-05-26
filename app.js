@@ -664,11 +664,149 @@ class FbAPI {
                 if (!g) continue;
                 const members = Array.isArray(g.members) ? g.members : [];
                 if (members.includes(myName)) {
-                    groups.push({ id: gid, name: g.name, owner: g.owner, members, avatar: g.avatar || null });
+                    groups.push({
+                        id: gid,
+                        name: g.name,
+                        owner: g.owner,
+                        members,
+                        avatar: g.avatar || null,
+                        activeCall: g.activeCall || null
+                    });
                 }
             }
         }
         return { ok: true, groups };
+    }
+
+    // グループの進行中通話を登録する（ホスト本人が呼ぶ想定）
+    // hostPeerId: メッシュ通話用のPeerJS ID（メッシュ参加者が接続するためのID）
+    static async setGroupActiveCall(token, groupId, hostName, hostPeerId) {
+        if (!token || !groupId || !hostName) return { ok: false, error: 'パラメータが不足しています' };
+        const sesSnap = await this._db.ref('sessions/' + token).get();
+        if (!sesSnap.exists()) return { ok: false, error: 'セッションが無効です' };
+        const myName = sesSnap.val().name;
+        // メンバーチェック
+        const groupRef = this._db.ref('groups/' + groupId);
+        const gSnap = await groupRef.get();
+        if (!gSnap.exists()) return { ok: false, error: 'グループが見つかりません' };
+        const g = gSnap.val();
+        const members = Array.isArray(g.members) ? g.members : [];
+        if (!members.includes(myName)) return { ok: false, error: 'グループに参加していません' };
+        // 既に別のホストの通話があるなら拒否（並列通話防止）
+        // ただし、自分が新ホストになろうとしている場合は許可（ホスト譲渡）
+        if (g.activeCall && g.activeCall.hostName && g.activeCall.hostName !== hostName && g.activeCall.hostName !== myName) {
+            return { ok: false, error: '既に別の通話が進行中です', existing: g.activeCall };
+        }
+        const callData = {
+            hostName,
+            startedAt: g.activeCall?.startedAt || this._now()
+        };
+        if (hostPeerId) callData.hostPeerId = hostPeerId;
+        await groupRef.child('activeCall').set(callData);
+        return { ok: true };
+    }
+
+    // グループ通話のホストPeerIDだけ更新する（ホスト譲渡時）
+    static async updateGroupCallHost(token, groupId, hostName, hostPeerId) {
+        if (!token || !groupId || !hostName || !hostPeerId) return { ok: false, error: 'パラメータが不足しています' };
+        const sesSnap = await this._db.ref('sessions/' + token).get();
+        if (!sesSnap.exists()) return { ok: false, error: 'セッションが無効です' };
+        const myName = sesSnap.val().name;
+        if (myName !== hostName) return { ok: false, error: '自分のみホスト更新できます' };
+        const groupRef = this._db.ref('groups/' + groupId);
+        const gSnap = await groupRef.get();
+        if (!gSnap.exists()) return { ok: false, error: 'グループが見つかりません' };
+        const g = gSnap.val();
+        const members = Array.isArray(g.members) ? g.members : [];
+        if (!members.includes(myName)) return { ok: false, error: 'グループに参加していません' };
+        const callData = {
+            hostName,
+            hostPeerId,
+            startedAt: g.activeCall?.startedAt || this._now()
+        };
+        await groupRef.child('activeCall').set(callData);
+        return { ok: true };
+    }
+
+    // グループの進行中通話を解除する（ホスト本人が呼ぶ想定）
+    static async clearGroupActiveCall(token, groupId) {
+        if (!token || !groupId) return { ok: false, error: 'パラメータが不足しています' };
+        const sesSnap = await this._db.ref('sessions/' + token).get();
+        if (!sesSnap.exists()) return { ok: false, error: 'セッションが無効です' };
+        const myName = sesSnap.val().name;
+        const groupRef = this._db.ref('groups/' + groupId);
+        const gSnap = await groupRef.get();
+        if (!gSnap.exists()) return { ok: false };
+        const g = gSnap.val();
+        // ホスト本人だけが解除可能
+        if (!g.activeCall || g.activeCall.hostName !== myName) return { ok: false, error: 'ホスト権限がありません' };
+        await groupRef.child('activeCall').remove();
+        // onDisconnect予約も解除
+        try { await groupRef.child('activeCall').onDisconnect().cancel(); } catch (_) { }
+        return { ok: true };
+    }
+
+    // 強制的にグループの活性通話をクリアする（メンバーなら誰でも実行可能、ゾンビ通話復旧用）
+    // 必ずメンバーチェックは行う。「明らかに死んだ通話」を回収する用途
+    static async forceClearGroupActiveCall(token, groupId) {
+        if (!token || !groupId) return { ok: false, error: 'パラメータが不足しています' };
+        const sesSnap = await this._db.ref('sessions/' + token).get();
+        if (!sesSnap.exists()) return { ok: false, error: 'セッションが無効です' };
+        const myName = sesSnap.val().name;
+        const groupRef = this._db.ref('groups/' + groupId);
+        const gSnap = await groupRef.get();
+        if (!gSnap.exists()) return { ok: false, error: 'グループが見つかりません' };
+        const g = gSnap.val();
+        const members = Array.isArray(g.members) ? g.members : [];
+        if (!members.includes(myName)) return { ok: false, error: 'グループに参加していません' };
+        await groupRef.child('activeCall').remove();
+        return { ok: true };
+    }
+
+    // 自分が切断されたら groups/{gid}/activeCall を自動で削除する
+    // （ブラウザを閉じた・タブを閉じた・ネットワーク切断 などに対応）
+    static async setupActiveCallOnDisconnect(groupId) {
+        if (!groupId) return;
+        try {
+            const ref = this._db.ref('groups/' + groupId + '/activeCall');
+            await ref.onDisconnect().remove();
+        } catch (e) {
+            console.warn('[mesh] onDisconnect setup failed:', e);
+        }
+    }
+
+    // onDisconnect予約を解除する（ホスト譲渡時など、自分のセッションが終了しても削除したくない場合）
+    static async cancelActiveCallOnDisconnect(groupId) {
+        if (!groupId) return;
+        try {
+            const ref = this._db.ref('groups/' + groupId + '/activeCall');
+            await ref.onDisconnect().cancel();
+        } catch (e) {
+            console.warn('[mesh] onDisconnect cancel failed:', e);
+        }
+    }
+
+    // groups/{gid}/activeCall の変更を購読する（リアルタイム反映）
+    // callback(groupId, activeCallObj|null)
+    static subscribeGroupActiveCalls(myName, groupIds, callback) {
+        this.unsubscribeGroupActiveCalls();
+        this._groupCallSubs = [];
+        for (const gid of groupIds) {
+            const ref = this._db.ref('groups/' + gid + '/activeCall');
+            const handler = ref.on('value', snap => {
+                callback(gid, snap.exists() ? snap.val() : null);
+            });
+            this._groupCallSubs.push({ ref, handler });
+        }
+    }
+
+    static unsubscribeGroupActiveCalls() {
+        if (this._groupCallSubs) {
+            for (const { ref, handler } of this._groupCallSubs) {
+                try { ref.off('value', handler); } catch (_) { }
+            }
+            this._groupCallSubs = null;
+        }
     }
 
     // ----------------- プロフィール画像 -----------------
@@ -760,6 +898,22 @@ class FbAPI {
         const snap = await this._db.ref('accounts/' + this._encName(name)).get();
         return snap.exists();
     }
+
+    // 全アカウント名を取得（予測候補用）
+    static async getAllAccountNames() {
+        try {
+            const snap = await this._db.ref('accounts').get();
+            if (!snap.exists()) return [];
+            const names = [];
+            const data = snap.val() || {};
+            for (const enc of Object.keys(data)) {
+                names.push(this._decName(enc));
+            }
+            return names;
+        } catch (_) {
+            return [];
+        }
+    }
     static async _removeSessionsByName(name) {
         const snap = await this._db.ref('sessions').get();
         if (!snap.exists()) return;
@@ -777,6 +931,119 @@ class FbAPI {
         if (!name) return;
         const presRef = this._db.ref('presence/' + this._encName(name));
         presRef.onDisconnect().remove();
+    }
+
+    // =====================================================
+    // チャット履歴のクラウド保存（デバイス間同期用）
+    // =====================================================
+    // 保持期間: 90日（_chatRetentionMs）
+    static _chatRetentionMs = 90 * 24 * 60 * 60 * 1000;
+
+    // convKey は "dm:A|B" または "grp:GROUPID" 形式
+    // Firebase キー用に変換: ":" や "|" をエスケープ
+    static _encConvKey(convKey) {
+        if (!convKey) return '';
+        // : と | は使えないので置換。元の構造は復元できる必要は無い（キーとして一意であればOK）
+        return convKey.replace(/[.#$\[\]\/:|]/g, c => '%' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+    }
+
+    // メッセージを Firebase に保存
+    // convKey: "dm:A|B" または "grp:GROUPID"
+    // msg: { msgId, from, content, ts, type, file?, groupId?, ... }
+    static async saveChatMessage(convKey, msg) {
+        if (!this._db || !convKey || !msg || !msg.msgId) return { ok: false };
+        try {
+            const encKey = this._encConvKey(convKey);
+            const branch = convKey.startsWith('dm:') ? 'dm' : (convKey.startsWith('grp:') ? 'group' : null);
+            if (!branch) return { ok: false };
+            const ref = this._db.ref('chats/' + branch + '/' + encKey + '/' + msg.msgId);
+            // file.data が undefined だと Firebase が拒否するので null 化
+            const sanitized = JSON.parse(JSON.stringify(msg));
+            await ref.set(sanitized);
+            return { ok: true };
+        } catch (e) {
+            console.warn('[saveChatMessage]', e);
+            return { ok: false, error: e?.message };
+        }
+    }
+
+    // メッセージを Firebase から取得（ts 昇順）
+    // sinceTs を渡すとそれ以降のメッセージのみ取得
+    static async fetchChatMessages(convKey, sinceTs) {
+        if (!this._db || !convKey) return [];
+        try {
+            const encKey = this._encConvKey(convKey);
+            const branch = convKey.startsWith('dm:') ? 'dm' : (convKey.startsWith('grp:') ? 'group' : null);
+            if (!branch) return [];
+            const ref = this._db.ref('chats/' + branch + '/' + encKey);
+            const snap = await ref.get();
+            if (!snap.exists()) return [];
+            const data = snap.val() || {};
+            const cutoff = this._now() - this._chatRetentionMs;
+            const arr = [];
+            for (const msgId of Object.keys(data)) {
+                const m = data[msgId];
+                if (!m || typeof m.ts !== 'number') continue;
+                if (m.ts < cutoff) continue; // 保持期限切れ
+                if (typeof sinceTs === 'number' && m.ts <= sinceTs) continue;
+                arr.push(m);
+            }
+            arr.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+            return arr;
+        } catch (e) {
+            console.warn('[fetchChatMessages]', e);
+            return [];
+        }
+    }
+
+    // メッセージのフィールドを更新（取り消し用）
+    // convKey と msgId を指定して特定フィールドだけ書き換え
+    static async updateChatMessage(convKey, msgId, patch) {
+        if (!this._db || !convKey || !msgId || !patch) return { ok: false };
+        try {
+            const encKey = this._encConvKey(convKey);
+            const branch = convKey.startsWith('dm:') ? 'dm' : (convKey.startsWith('grp:') ? 'group' : null);
+            if (!branch) return { ok: false };
+            const ref = this._db.ref('chats/' + branch + '/' + encKey + '/' + msgId);
+            // 一旦取得して存在確認
+            const snap = await ref.get();
+            if (!snap.exists()) return { ok: false, error: 'not_found' };
+            const sanitized = JSON.parse(JSON.stringify(patch));
+            await ref.update(sanitized);
+            return { ok: true };
+        } catch (e) {
+            console.warn('[updateChatMessage]', e);
+            return { ok: false, error: e?.message };
+        }
+    }
+
+    // 保持期限切れメッセージを削除（バックグラウンド）
+    // 自分が関わる会話のみ対象
+    static async pruneExpiredChats(convKeys) {
+        if (!this._db || !Array.isArray(convKeys)) return;
+        const cutoff = this._now() - this._chatRetentionMs;
+        for (const convKey of convKeys) {
+            try {
+                const encKey = this._encConvKey(convKey);
+                const branch = convKey.startsWith('dm:') ? 'dm' : (convKey.startsWith('grp:') ? 'group' : null);
+                if (!branch) continue;
+                const ref = this._db.ref('chats/' + branch + '/' + encKey);
+                const snap = await ref.get();
+                if (!snap.exists()) continue;
+                const data = snap.val() || {};
+                const updates = {};
+                for (const msgId of Object.keys(data)) {
+                    const m = data[msgId];
+                    if (!m || typeof m.ts !== 'number') continue;
+                    if (m.ts < cutoff) updates[msgId] = null;
+                }
+                if (Object.keys(updates).length > 0) {
+                    await ref.update(updates);
+                }
+            } catch (e) {
+                console.warn('[pruneExpiredChats]', convKey, e);
+            }
+        }
     }
 }
 
@@ -855,6 +1122,24 @@ class SecureVideoChat {
         this.pendingSignal = null;
         this.callTargetName = null;
         this._processedSignalIds = new Set();
+
+        // ===== メッシュ通話用 =====
+        this.meshPeer = null;
+        this.meshMyId = null;
+        this.meshPeers = new Map();         // peerId -> {call, conn, name, stream, micOn, camOn, screenSharing}
+        this.meshRoomId = null;             // ルームID = ホストの本名
+        this.meshHostName = null;
+        this.meshIsHost = false;
+        this.meshGroupId = null;            // グループ通話のとき
+        this.meshGroupName = null;
+        this.meshMicOn = true;
+        this.meshCamOn = false;             // カメラはOFFスタート（既存仕様踏襲）
+        this.meshIsScreenSharing = false;
+        this.meshSavedCameraTrack = null;
+        this.outgoingMeshInvitees = new Set();
+        this.pendingMeshInvite = null;
+        // 進行中のグループ通話の追跡: groupId -> { hostName, startedAt }
+        this.activeGroupCalls = new Map();
 
         // Firebase 初期化
         try {
@@ -1295,14 +1580,11 @@ class SecureVideoChat {
         this._loadMyAvatar();
 
         // グループ一覧を取得してから未読を再計算（グループバッジが正しく出るように）
-        FbAPI.getGroups(this.token).then(res => {
-            if (res?.ok) {
-                this.myGroups = res.groups || [];
-                for (const g of this.myGroups) {
-                    if (g.avatar) this.groupAvatarCache[g.id] = g.avatar;
-                }
-                this._recomputeAllUnreadBadges();
-            }
+        // _loadGroups は activeCall 同期と購読も行う
+        this._loadGroups().then(() => {
+            this._recomputeAllUnreadBadges();
+            // グループ一覧が揃った後、クラウドからチャット履歴を取り込む（バックグラウンド）
+            this._syncChatHistoryFromCloud().catch(() => { });
         }).catch(() => { });
 
         // フレンドリスト取得
@@ -1314,6 +1596,8 @@ class SecureVideoChat {
                 ]);
                 this._updateFriendBadge((friendRes.incoming || []).length);
                 this._cachedFriendData = friendRes;
+                // フレンドが分かった時点で DM 履歴の取り込みも開始（重複呼び出しは内部でガード）
+                this._syncChatHistoryFromCloud().catch(() => { });
             }
         }).catch(() => { });
 
@@ -1381,6 +1665,12 @@ class SecureVideoChat {
             this.el.friendSearchInput.addEventListener('keydown', e => { if (e.key === 'Enter') this.sendFriendRequest(); });
         }
 
+        // ===== ユーザー名候補（カスタムドロップダウン） =====
+        // data-suggest-users="true" を持つ全ての input にbind
+        document.querySelectorAll('input[data-suggest-users="true"]').forEach(inp => {
+            this._bindSuggestInput(inp);
+        });
+
         if (this.el.acceptFriendRequestBtn) {
             this.el.acceptFriendRequestBtn.addEventListener('click', () => this.handleIncomingFriendRequest(true));
         }
@@ -1434,15 +1724,22 @@ class SecureVideoChat {
             this.el.disconnectButton.disabled = true;
             this.el.disconnectButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 切断中...';
             this.disconnectedBySelf = true;
-            this.sendDisconnectSignal().then(() => {
-                this.showDisconnectOverlay('通話を終了しました');
-                this.disconnect();
-            });
+            // メッシュ通話を終了
+            this.disconnect();
         });
         this.el.toggleMicButton.addEventListener('click', () => this.toggleAudio());
         this.el.toggleVideoButton.addEventListener('click', () => this.toggleVideo());
         if (this.el.screenShareButton) {
             this.el.screenShareButton.addEventListener('click', () => this.toggleScreenShare());
+        }
+        // メッシュ通話招待ボタン
+        const meshInviteBtn = document.getElementById('meshInviteBtn');
+        if (meshInviteBtn) {
+            meshInviteBtn.addEventListener('click', () => this.showInviteFriendModal());
+        }
+        const meshInviteCloseBtn = document.getElementById('meshInviteCloseBtn');
+        if (meshInviteCloseBtn) {
+            meshInviteCloseBtn.addEventListener('click', () => this.hideInviteFriendModal());
         }
         this.el.volumeControlButton.addEventListener('click', () => this.toggleVolumeControl());
         this.el.volumeSlider.addEventListener('input', e => this.updateVolume(e.target.value));
@@ -1510,10 +1807,8 @@ class SecureVideoChat {
         if (this.el.dmCallBtn) this.el.dmCallBtn.addEventListener('click', () => {
             if (this.dmPartner) {
                 this.el.dmModal.classList.remove('visible');
-                const onlineEl = this.el.userList.querySelector(`[data-name="${CSS.escape(this.dmPartner)}"]`);
-                const peerId = onlineEl?.dataset.peerId;
-                if (peerId) this.startOutgoingCall(this.dmPartner, peerId);
-                else this.showNotification('通知', '相手がオフラインです', 'warning');
+                // メッシュ通話ではpeerIdは不要（招待者本名で接続）
+                this.startOutgoingCall(this.dmPartner, null);
             }
         });
 
@@ -1562,6 +1857,26 @@ class SecureVideoChat {
         if (this.el.acceptGroupInviteBtn) this.el.acceptGroupInviteBtn.addEventListener('click', () => this._handleGroupInvite(true));
         if (this.el.rejectGroupInviteBtn) this.el.rejectGroupInviteBtn.addEventListener('click', () => this._handleGroupInvite(false));
 
+        // グループ通話開始ボタン
+        const groupCallBtn = document.getElementById('groupCallBtn');
+        if (groupCallBtn) {
+            groupCallBtn.addEventListener('click', async () => {
+                if (!this.currentGroupId) {
+                    this.showNotification('エラー', 'グループが選択されていません', 'error');
+                    return;
+                }
+                const gid = this.currentGroupId;
+                // グループチャットモーダルを閉じる
+                if (this.el.groupModal) this.el.groupModal.classList.remove('visible');
+                // 既に進行中の通話があるなら参加、なければ自分がホストとして開始
+                if (this.activeGroupCalls && this.activeGroupCalls.has(gid)) {
+                    await this._joinActiveGroupCall(gid);
+                } else {
+                    await this._startGroupMeshCall(gid);
+                }
+            });
+        }
+
         // グループ設定モーダル
         if (this.el.groupSettingsBtn) this.el.groupSettingsBtn.addEventListener('click', () => this._openGroupSettings());
         if (this.el.groupSettingsCloseBtn) this.el.groupSettingsCloseBtn.addEventListener('click', () => this.el.groupSettingsModal.classList.remove('visible'));
@@ -1594,6 +1909,19 @@ class SecureVideoChat {
         this.stopOnlineListPolling();
         FbAPI.unsubscribeSignals();
         FbAPI.unsubscribeFriends();
+        FbAPI.unsubscribeGroupActiveCalls();
+        this._activeCallsSubKey = null;
+        // 遅延中の招待タイマーをクリア
+        if (this._pendingInviteDelay) {
+            for (const v of this._pendingInviteDelay.values()) {
+                try { clearTimeout(v.timer); } catch (_) { }
+            }
+            this._pendingInviteDelay.clear();
+        }
+        // 通話中なら退出（ホストならFirebase上のactiveCallも消える）
+        try { this._leaveMeshCall(true); } catch (_) { }
+        // ローカルの進行中通話キャッシュをクリア
+        if (this.activeGroupCalls) this.activeGroupCalls.clear();
         if (this._qualityInterval) {
             clearInterval(this._qualityInterval);
             this._qualityInterval = null;
@@ -1726,21 +2054,27 @@ class SecureVideoChat {
 
     // マイク/カメラボタンの表示を現在の state に強制同期する（再通話時の表示崩れを防ぐ）
     _syncMediaButtonsUI() {
+        // メッシュ通話中ならメッシュの状態を見る
+        const inMesh = this._meshIsInCall && this._meshIsInCall();
+        const micOn = inMesh ? this.meshMicOn : this.isAudioEnabled;
+        const camOn = inMesh ? this.meshCamOn : this.isVideoEnabled;
+        const sharing = inMesh ? this.meshIsScreenSharing : this.isScreenSharing;
+
         if (this.el.toggleMicButton) {
-            this.el.toggleMicButton.classList.toggle('active', !this.isAudioEnabled);
+            this.el.toggleMicButton.classList.toggle('active', !micOn);
             const icon = this.el.toggleMicButton.querySelector('i');
-            if (icon) icon.className = this.isAudioEnabled ? 'fas fa-microphone' : 'fas fa-microphone-slash';
+            if (icon) icon.className = micOn ? 'fas fa-microphone' : 'fas fa-microphone-slash';
         }
         if (this.el.toggleVideoButton) {
-            this.el.toggleVideoButton.classList.toggle('active', !this.isVideoEnabled);
+            this.el.toggleVideoButton.classList.toggle('active', !camOn);
             const icon = this.el.toggleVideoButton.querySelector('i');
-            if (icon) icon.className = this.isVideoEnabled ? 'fas fa-video' : 'fas fa-video-slash';
+            if (icon) icon.className = camOn ? 'fas fa-video' : 'fas fa-video-slash';
         }
         if (this.el.screenShareButton) {
-            this.el.screenShareButton.classList.toggle('sharing', !!this.isScreenSharing);
+            this.el.screenShareButton.classList.toggle('sharing', !!sharing);
             const icon = this.el.screenShareButton.querySelector('i');
-            if (icon) icon.className = this.isScreenSharing ? 'fas fa-stop' : 'fas fa-desktop';
-            this.el.screenShareButton.title = this.isScreenSharing ? '画面共有を停止' : '画面共有';
+            if (icon) icon.className = sharing ? 'fas fa-stop' : 'fas fa-desktop';
+            this.el.screenShareButton.title = sharing ? '画面共有を停止' : '画面共有';
         }
     }
 
@@ -2432,6 +2766,13 @@ class SecureVideoChat {
     // =====================================================
     subscribeSignalStream() {
         if (!this.myName) return;
+        // 遅延中の mesh_invite を一時保持するマップ (送信者名 -> { timer, signal })
+        // 招待を受け取ってもすぐにモーダル表示せず、短時間待ってから処理する。
+        // その間に同じ送信者から cancel/reject が来たら破棄する。
+        // これにより、オフライン中に蓄積した invite + cancel のペアや、
+        // 招待直後に発信側が通話を終わらせたケースで、モーダルが一瞬出る問題を防ぐ。
+        if (!this._pendingInviteDelay) this._pendingInviteDelay = new Map();
+
         FbAPI.subscribeSignals(this.myName, async (signal) => {
             // 処理済みシグナルは無視
             if (this._processedSignalIds.has(signal.id)) {
@@ -2439,13 +2780,57 @@ class SecureVideoChat {
                 return;
             }
             this._processedSignalIds.add(signal.id);
-            try {
-                await this.handleSignal(signal);
-            } catch (e) {
-                console.warn('handleSignalエラー:', e);
+
+            // mesh_invite は遅延処理する
+            if (signal.type === 'mesh_invite') {
+                // 既に同じ送信者から遅延中の invite があれば、新しい方で上書き
+                const existing = this._pendingInviteDelay.get(signal.from);
+                if (existing) {
+                    clearTimeout(existing.timer);
+                    // 古い招待は ack 済み扱いにする
+                    if (existing.signal && existing.signal.id !== signal.id) {
+                        FbAPI.ackSignal(this.token, existing.signal.id, this.myName).catch(() => { });
+                    }
+                }
+                const timer = setTimeout(async () => {
+                    this._pendingInviteDelay.delete(signal.from);
+                    try {
+                        await this.handleSignal(signal);
+                    } catch (e) {
+                        console.warn('handleSignalエラー:', e);
+                    }
+                    await FbAPI.ackSignal(this.token, signal.id, this.myName);
+                }, 700); // 700ms 遅延（同時に届いた cancel を拾うのに十分な時間）
+                this._pendingInviteDelay.set(signal.from, { timer, signal });
+            } else if (signal.type === 'mesh_invite_cancel' || signal.type === 'mesh_invite_reject') {
+                // 遅延中の invite があれば破棄
+                const pending = this._pendingInviteDelay.get(signal.from);
+                if (pending) {
+                    clearTimeout(pending.timer);
+                    this._pendingInviteDelay.delete(signal.from);
+                    // 破棄された invite は ack
+                    FbAPI.ackSignal(this.token, pending.signal.id, this.myName).catch(() => { });
+                    // この cancel/reject 自体も処理不要（モーダルが出ていないため）。ackだけ
+                    await FbAPI.ackSignal(this.token, signal.id, this.myName);
+                } else {
+                    // 通常通り処理
+                    try {
+                        await this.handleSignal(signal);
+                    } catch (e) {
+                        console.warn('handleSignalエラー:', e);
+                    }
+                    await FbAPI.ackSignal(this.token, signal.id, this.myName);
+                }
+            } else {
+                try {
+                    await this.handleSignal(signal);
+                } catch (e) {
+                    console.warn('handleSignalエラー:', e);
+                }
+                // シグナル処理後は削除（ack相当）
+                await FbAPI.ackSignal(this.token, signal.id, this.myName);
             }
-            // シグナル処理後は削除（ack相当）
-            await FbAPI.ackSignal(this.token, signal.id, this.myName);
+
             if (this._processedSignalIds.size > 200) {
                 const it = this._processedSignalIds.values();
                 this._processedSignalIds.delete(it.next().value);
@@ -2456,57 +2841,29 @@ class SecureVideoChat {
     async handleSignal(signal) {
         console.log('[シグナル受信]', signal);
         switch (signal.type) {
-            case 'call_request':
-                if (this.currentCall) {
-                    await FbAPI.sendSignal(this.token, signal.from, 'call_reject', '通話中');
-                    return;
-                }
-                if (this.el.callingModal.classList.contains('visible') && this.callTargetName === signal.from) {
-                    console.log('[同時発信] 相手も同時に発信していたため自動接続:', signal.from);
-                    clearTimeout(this._callTimeout);
-                    const callingToEl = this.el.callingModal.querySelector('.calling-to');
-                    const cancelBtn = document.getElementById('cancelCallBtn');
-                    if (callingToEl) callingToEl.textContent = '接続中...';
-                    if (cancelBtn) cancelBtn.style.display = 'none';
-                    try {
-                        await FbAPI.sendSignal(this.token, signal.from, 'call_accept', this.peer.id);
-                    } catch (_) { }
-                    if (this.myName < signal.from) {
-                        this.initiateWebRTCCall(signal.signal_data);
-                    }
-                    return;
-                }
-                if (this.pendingSignal) {
-                    return;
-                }
-                this.showIncomingCall(signal);
+            // ============ メッシュ通話シグナル ============
+            case 'mesh_invite':
+                this._onMeshInviteReceived(signal);
                 break;
 
-            case 'call_accept':
-                if (!this.el.callingModal.classList.contains('visible')) return;
-                clearTimeout(this._callTimeout);
-                {
-                    const callingToEl = this.el.callingModal.querySelector('.calling-to');
-                    const cancelBtn = document.getElementById('cancelCallBtn');
-                    if (callingToEl) callingToEl.textContent = '接続中...';
-                    if (cancelBtn) cancelBtn.style.display = 'none';
-                }
-                console.log('[call_accept] 相手ピアID:', signal.signal_data);
-                this.initiateWebRTCCall(signal.signal_data);
+            case 'mesh_invite_accept':
+                this._onMeshInviteAccepted(signal);
                 break;
 
-            case 'call_reject':
-                if (!this.el.callingModal.classList.contains('visible')) return;
-                clearTimeout(this._callTimeout);
-                this.el.callingModal.classList.remove('visible');
-                this.callTargetName = null;
-                this.showNotification('通知', `${signal.from} は通話を拒否しました`, 'warning');
+            case 'mesh_invite_reject':
+                this._onMeshInviteRejected(signal);
                 break;
 
-            case 'call_end':
-                if (!this.isDisconnecting) {
-                    this.handleRemoteDisconnect(`${signal.from} が通話を終了しました`);
-                }
+            case 'mesh_invite_cancel':
+                this._onMeshInviteCanceled(signal);
+                break;
+
+            case 'group_call_notify':
+                this._onGroupCallNotified(signal);
+                break;
+
+            case 'group_call_end':
+                this._onGroupCallEnded(signal);
                 break;
 
             case 'friend_request':
@@ -2592,201 +2949,27 @@ class SecureVideoChat {
     }
 
     // =====================================================
-    // 発信
+    // 発信（メッシュ通話にリダイレクト）
     // =====================================================
     async startOutgoingCall(targetName, targetPeerId) {
-        if (this.currentCall) {
-            this.showNotification('通知', '現在通話中です', 'warning');
-            return;
-        }
-        // フレンドのみ通話可能
-        if (!this.friendNames.has(targetName)) {
-            this.showNotification('通知', 'フレンドのみ通話できます。先にフレンド申請を送ってください。', 'warning');
-            return;
-        }
-        if (!targetPeerId) {
-            this.showNotification('エラー', '相手のピアIDが取得できませんでした。リストを更新してください。', 'error');
-            return;
-        }
-        if (!this.peer || !this.peer.id) {
-            this.showNotification('エラー', '接続の準備が完了していません。しばらく待ってから再試行してください。', 'error');
-            return;
-        }
-
-        if (!this.localStream) {
-            await this.setupLocalStream();
-            if (!this.isMediaReady) {
-                this.showNotification('通知', 'カメラ・マイクが利用できません。音声・映像なしで通話します。', 'warning');
-            }
-        }
-
-        this.callTargetName = targetName;
-        this._targetPeerId = targetPeerId;
-        this.el.callingTargetName.textContent = targetName;
-        this.el.callingModal.classList.add('visible');
-
-        try {
-            const myPeerId = this.peer.id;
-            console.log('[発信] to:', targetName, 'myPeerId:', myPeerId);
-            const res = await FbAPI.sendSignal(this.token, targetName, 'call_request', myPeerId);
-            if (!res.ok) {
-                this.el.callingModal.classList.remove('visible');
-                this.showNotification('エラー', '通話申請の送信に失敗しました: ' + (res.error || ''), 'error');
-                return;
-            }
-        } catch (e) {
-            this.el.callingModal.classList.remove('visible');
-            this.showNotification('エラー', '通話申請の送信に失敗しました', 'error');
-            return;
-        }
-
-        this._callTimeout = setTimeout(() => {
-            if (this.el.callingModal.classList.contains('visible')) {
-                this.el.callingModal.classList.remove('visible');
-                this.callTargetName = null;
-                this.showNotification('通知', '通話申請がタイムアウトしました', 'warning');
-            }
-        }, 30000);
+        // targetPeerId は既存呼び出し互換のため受け取るが使用しない
+        // メッシュ通話では PeerJSのID = meshcall-{ホスト本名}-{...} で接続するため、peerIdは不要
+        return this._startOneToOneMeshCall(targetName);
     }
 
     async cancelOutgoingCall() {
-        clearTimeout(this._callTimeout);
-        this.el.callingModal.classList.remove('visible');
-        if (this.callTargetName) {
-            try {
-                await FbAPI.sendSignal(this.token, this.callTargetName, 'call_reject', 'キャンセル');
-            } catch (_) { }
-        }
-        this.callTargetName = null;
+        return this._cancelMeshOutgoingCall();
     }
 
-    initiateWebRTCCall(remotePeerId) {
-        if (!remotePeerId) return;
+    // initiateWebRTCCall, showIncomingCall は廃止（メッシュ系に統合）
 
-        this.el.callingModal.classList.remove('visible');
-        const callingToEl = this.el.callingModal.querySelector('.calling-to');
-        const cancelBtn = document.getElementById('cancelCallBtn');
-        if (callingToEl) callingToEl.textContent = '呼び出し中...';
-        if (cancelBtn) cancelBtn.style.display = '';
-
-        this.el.remoteName.textContent = this.callTargetName || '相手';
-        this.el.videoGrid.style.display = '';
-        this.el.waitingState.style.display = 'none';
-        this.el.callControls.style.display = '';
-        this.showUserListSection(false);
-
-        this.dataConnection = this.peer.connect(remotePeerId);
-        this.setupDataConnection();
-
-        const call = this.peer.call(remotePeerId, this.localStream || undefined);
-        this.handleCall(call);
-    }
-
-    showIncomingCall(signal) {
-        if (this.blockedUsers.has(signal.from)) {
-            FbAPI.sendSignal(this.token, signal.from, 'call_reject', 'ブロックされています').catch(() => { });
-            return;
-        }
-        // フレンドのみ通話可能（常時強制）
-        if (!this.friendNames.has(signal.from)) {
-            FbAPI.sendSignal(this.token, signal.from, 'call_reject', 'フレンド以外の通話を受け付けていません').catch(() => { });
-            return;
-        }
-        this.pendingSignal = signal;
-        this._resetIncomingCallButtons();
-        this.el.incomingCallerName.textContent = signal.from;
-        this.el.incomingCallModal.classList.add('visible');
-
-        this._incomingTimeout = setTimeout(() => {
-            if (this.el.incomingCallModal.classList.contains('visible')) {
-                this.rejectIncomingCall();
-            }
-        }, 30000);
-    }
-
+    // 既存のUIイベント（acceptCallBtn / rejectCallBtn）から呼ばれるため、メソッド名は残し中身をメッシュ版へ
     async acceptIncomingCall() {
-        if (this._incomingCallHandled) return;
-        this._incomingCallHandled = true;
-
-        const acceptBtn = this.el.acceptCallBtn;
-        const rejectBtn = this.el.rejectCallBtn;
-        acceptBtn.classList.add('processing');
-        acceptBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 受諾中...';
-        rejectBtn.disabled = true;
-
-        clearTimeout(this._incomingTimeout);
-
-        if (!this.pendingSignal) {
-            this._incomingCallHandled = false;
-            acceptBtn.classList.remove('processing');
-            acceptBtn.innerHTML = '<i class="fas fa-phone"></i> 応答する';
-            rejectBtn.disabled = false;
-            return;
-        }
-        const signal = this.pendingSignal;
-        this.pendingSignal = null;
-
-        console.log('[着信承認] 発信者ピアID:', signal.signal_data, '発信者名:', signal.from);
-
-        this.callTargetName = signal.from;
-        this.el.remoteName.textContent = signal.from;
-
-        if (!this.localStream) {
-            await this.setupLocalStream();
-            if (!this.isMediaReady) {
-                this.showNotification('通知', 'カメラ・マイクが利用できません。音声・映像なしで通話します。', 'warning');
-            }
-        }
-
-        try {
-            await FbAPI.sendSignal(this.token, signal.from, 'call_accept', this.peer.id);
-        } catch (e) {
-            this.showNotification('エラー', '応答シグナルの送信に失敗しました', 'error');
-            this._incomingCallHandled = false;
-            acceptBtn.classList.remove('processing');
-            acceptBtn.innerHTML = '<i class="fas fa-phone"></i> 応答する';
-            rejectBtn.disabled = false;
-            return;
-        }
-
-        acceptBtn.classList.remove('processing');
-        acceptBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 接続待機中...';
-        acceptBtn.disabled = true;
-        rejectBtn.disabled = true;
-
-        console.log('[着信承認完了] 発信者からのWebRTC着信を待機中...');
+        return this._acceptMeshIncomingCall();
     }
 
     async rejectIncomingCall() {
-        if (this._incomingCallHandled) return;
-        this._incomingCallHandled = true;
-
-        const acceptBtn = this.el.acceptCallBtn;
-        const rejectBtn = this.el.rejectCallBtn;
-        rejectBtn.classList.add('processing');
-        rejectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 拒否中...';
-        acceptBtn.disabled = true;
-
-        clearTimeout(this._incomingTimeout);
-
-        if (!this.pendingSignal) {
-            this._incomingCallHandled = false;
-            rejectBtn.classList.remove('processing');
-            rejectBtn.innerHTML = '<i class="fas fa-phone-slash"></i> 拒否する';
-            acceptBtn.disabled = false;
-            return;
-        }
-        const signal = this.pendingSignal;
-        this.pendingSignal = null;
-
-        try {
-            await FbAPI.sendSignal(this.token, signal.from, 'call_reject', '拒否');
-        } catch (_) { }
-
-        this.el.incomingCallModal.classList.remove('visible');
-        rejectBtn.classList.remove('processing');
-        rejectBtn.innerHTML = '<i class="fas fa-phone-slash"></i> 拒否する';
-        acceptBtn.disabled = false;
+        return this._rejectMeshIncomingCall();
     }
 
     _resetIncomingCallButtons() {
@@ -2804,133 +2987,30 @@ class SecureVideoChat {
     }
 
     // =====================================================
-    // WebRTC通話処理
+    // 旧WebRTC通話処理は削除（メッシュ通話に統合）
+    // 既存コードから呼ばれているメソッドはno-opまたはリダイレクト
     // =====================================================
-    handleCall(call) {
-        this.currentCall = call;
+    handleCall() { /* 旧1対1WebRTC用。廃止 */ }
+    setupDataConnection() { /* 旧1対1WebRTC用。廃止 */ }
+    handleRemoteDisconnect() { /* 旧1対1WebRTC用。廃止 */ }
+    async sendDisconnectSignal() { /* 旧1対1WebRTC用。廃止 */ }
+    _attachRemoteVideoTrackWatcher() { /* 旧1対1WebRTC用。廃止 */ }
 
-        call.on('stream', stream => {
-            this.el.remoteVideo.srcObject = stream;
-            this.setupAudioBoost(stream);
-            this.updateStatus('通話中');
-            this.startConnectionQualityMonitoring();
-            // 相手のビデオトラック状態を監視（要件2: カメラOFF時にアバター表示）
-            this._attachRemoteVideoTrackWatcher(stream);
-            // 接続直後に自分の現在のカメラ状態を相手に通知
-            // （DataConnectionが開くのを少し待ってから）
-            setTimeout(() => this._sendMediaStateToPeer(), 600);
-        });
-
-        call.on('close', () => {
-            if (this.isDisconnecting) return;
-            this.handleRemoteDisconnect('相手が通話を終了しました');
-        });
-
-        call.peerConnection.oniceconnectionstatechange = () => {
-            this.updateConnectionQuality(call.peerConnection.iceConnectionState);
-        };
-    }
-
-    // 相手のビデオトラックの mute/unmute/ended を監視し、カメラOFF時にアバター表示を出す
-    _attachRemoteVideoTrackWatcher(stream) {
-        const setRemoteCameraState = (off) => {
-            this.remoteCameraOff = off;
-            this._updateRemoteAvatarOverlay();
-        };
-        const watchTrack = (track) => {
-            if (!track) return;
-            // 初期状態
-            setRemoteCameraState(track.muted === true);
-            track.addEventListener('mute', () => setRemoteCameraState(true));
-            track.addEventListener('unmute', () => setRemoteCameraState(false));
-            track.addEventListener('ended', () => setRemoteCameraState(true));
-        };
-        const videoTracks = stream.getVideoTracks();
-        if (videoTracks.length === 0) {
-            // 相手がカメラ送信していない
-            setRemoteCameraState(true);
-        } else {
-            videoTracks.forEach(watchTrack);
-        }
-        // 新しいトラックが追加された場合（画面共有→カメラ復帰など）も監視
-        stream.addEventListener('addtrack', e => {
-            if (e.track && e.track.kind === 'video') watchTrack(e.track);
-        });
-        stream.addEventListener('removetrack', e => {
-            if (e.track && e.track.kind === 'video') {
-                if (stream.getVideoTracks().length === 0) setRemoteCameraState(true);
-            }
-        });
-    }
-
-    setupDataConnection() {
-        this.dataConnection.on('open', () => {
-            this.updateStatus('通話中');
-        });
-
-        this.dataConnection.on('data', async data => {
-            if (data && data.type === 'DISCONNECT_SIGNAL') {
-                if (!this.isDisconnecting) {
-                    this.handleRemoteDisconnect('相手が通話を終了しました');
-                }
-                return;
-            }
-            try {
-                const decrypted = await CryptoUtil.decrypt(this.encryptionKey, data.iv, data.encryptedData);
-                this.handleReceivedData(JSON.parse(new TextDecoder().decode(decrypted)));
-            } catch (_) { }
-        });
-
-        this.dataConnection.on('close', () => {
-            if (this.isDisconnecting) return;
-            this.handleRemoteDisconnect('相手が通話を終了しました');
-        });
-    }
-
-    handleRemoteDisconnect(reason) {
-        if (this.isDisconnecting) return;
-        if (this._remoteDisconnectHandled) return;
-        this._remoteDisconnectHandled = true;
-        if (!this.currentCall && !this.dataConnection) return;
-        this.showDisconnectOverlay(reason);
-        this.disconnect();
-    }
-
-    async sendDisconnectSignal() {
-        if (this.dataConnection && this.dataConnection.open !== false) {
-            try {
-                this.dataConnection.send({ type: 'DISCONNECT_SIGNAL' });
-                await new Promise(r => setTimeout(r, 150));
-            } catch (_) { }
-        }
-        if (this.token && this.el.remoteName.textContent) {
-            try {
-                await FbAPI.sendSignal(this.token, this.el.remoteName.textContent, 'call_end', '');
-            } catch (_) { }
-        }
-    }
-
+    // 既存のdisconnectButtonから呼ばれる。メッシュ通話の退出として動作。
     async disconnect() {
         if (this.isDisconnecting) return;
         this.isDisconnecting = true;
+
+        try {
+            await this._leaveMeshCall(true);
+        } catch (e) {
+            console.warn('[disconnect] _leaveMeshCall失敗:', e);
+        }
 
         if (this._qualityInterval) {
             clearInterval(this._qualityInterval);
             this._qualityInterval = null;
         }
-
-        // 画面共有中なら強制終了（カメラトラックに戻す）
-        if (this.isScreenSharing) {
-            try { await this._stopScreenShare(true); } catch (_) { }
-        }
-
-        await this.cleanup();
-
-        this.el.videoGrid.style.display = 'none';
-        this.el.waitingState.style.display = '';
-        this.el.callControls.style.display = 'none';
-        this.showUserListSection(true);
-
         if (this.audioContext) {
             try { this.audioContext.close(); } catch (_) { }
             this.audioContext = null;
@@ -2940,36 +3020,23 @@ class SecureVideoChat {
             this.makeUpGainNode = null;
             this.audioSource = null;
         }
-        this.el.remoteVideo.muted = false;
+        if (this.el.remoteVideo) this.el.remoteVideo.muted = false;
         this.isVolumeControlVisible = false;
         if (this.el.volumeSliderContainer) this.el.volumeSliderContainer.classList.remove('visible');
-        // 音量を100%にリセットし、スライダーとUI（バー色・BOOSTバッジ・数値）も完全リセット
         this.currentVolume = 100;
         if (this.el.volumeSlider) this.el.volumeSlider.value = 100;
-        this._refreshVolumeUI(100);
-        this.updateStatus('オンライン');
+        if (this._refreshVolumeUI) this._refreshVolumeUI(100);
 
         this.disconnectedBySelf = false;
         this.isDisconnecting = false;
         this.callTargetName = null;
 
-        // カメラ・マイクの状態を初期値（カメラOFF / マイクON）にリセット ＋ 画面共有解除
+        // 旧フラグも同期リセット
         this.isVideoEnabled = false;
         this.isAudioEnabled = true;
         this.isScreenSharing = false;
         this.savedCameraTrack = null;
         this.remoteCameraOff = false;
-        // 保持しているローカルストリームのトラックもこの状態に合わせる
-        if (this.localStream) {
-            try {
-                this.localStream.getVideoTracks().forEach(t => t.enabled = false);
-                this.localStream.getAudioTracks().forEach(t => t.enabled = true);
-            } catch (_) { }
-        }
-        // ボタン表示を強制同期 → 次回通話時の表示崩れを防ぐ
-        this._syncMediaButtonsUI();
-        this._updateLocalAvatarOverlay();
-        this._updateRemoteAvatarOverlay();
 
         if (this.el.disconnectButton) {
             this.el.disconnectButton.disabled = false;
@@ -2980,20 +3047,6 @@ class SecureVideoChat {
             this._remoteDisconnectHandled = false;
             this._incomingCallHandled = false;
         }, 1000);
-
-        try {
-            await this.initializePeer();
-            // localStream は破棄せず保持。次回の通話で再利用してカメラ・マイクの許可を再要求しない
-            if (this.el.localVideo) {
-                this.el.localVideo.style.display = '';
-                // 保持しているストリームを再アタッチして表示
-                if (this.localStream && this.el.localVideo.srcObject !== this.localStream) {
-                    this.el.localVideo.srcObject = this.localStream;
-                }
-            }
-        } catch (e) {
-            console.warn('再初期化失敗:', e);
-        }
 
         await this.refreshOnlineList();
     }
@@ -3006,30 +3059,17 @@ class SecureVideoChat {
     }
 
     async cleanup() {
-        const call = this.currentCall;
-        const dc = this.dataConnection;
+        // 旧1対1WebRTC用のクリーンアップ。メッシュ通話には影響しないが、
+        // beforeunload時に既存this.peer（通常Peer）を破棄する役割は残す
         const peer = this.peer;
-
-        this.currentCall = null;
-        this.dataConnection = null;
         this.peer = null;
-        // localStream は保持してカメラ・マイクの再取得を不要にする
-
-        if (call) { try { call.close(); } catch (_) { } }
-        if (dc) { try { dc.close(); } catch (_) { } }
         if (peer) { try { peer.destroy(); } catch (_) { } }
-
-        if (this.el.remoteVideo) this.el.remoteVideo.srcObject = null;
-        // localVideo.srcObject は保持（ストリーム再利用のため）
     }
 
     handleReceivedData(data) {
         if (!data || typeof data !== 'object') return;
         if (data.type === 'MEDIA_STATE') {
-            // 相手のカメラ/画面共有状態通知
-            // 画面共有中はカメラOFFでも映像があるので、カメラOFFオーバーレイは出さない
-            this.remoteCameraOff = !data.videoOn && !data.screenSharing;
-            this._updateRemoteAvatarOverlay();
+            // 旧1対1WebRTC用。メッシュ通話では meshHandleData が処理する
             return;
         }
         console.log('Received:', data);
@@ -3045,11 +3085,171 @@ class SecureVideoChat {
     }
     _saveLocalChatDB() {
         const keys = Object.keys(this.localChatDB);
-        if (keys.length > 50) keys.slice(0, keys.length - 50).forEach(k => delete this.localChatDB[k]);
+        // 会話数の上限を緩めに（クラウドから過去履歴を取り込むため）
+        if (keys.length > 200) keys.slice(0, keys.length - 200).forEach(k => delete this.localChatDB[k]);
         Object.keys(this.localChatDB).forEach(k => {
-            if (this.localChatDB[k].length > 200) this.localChatDB[k] = this.localChatDB[k].slice(-200);
+            // 1会話あたり最大1000件まで保持（古いものから削る）
+            if (this.localChatDB[k].length > 1000) this.localChatDB[k] = this.localChatDB[k].slice(-1000);
         });
-        localStorage.setItem('svc_chat_db', JSON.stringify(this.localChatDB));
+        try {
+            localStorage.setItem('svc_chat_db', JSON.stringify(this.localChatDB));
+        } catch (e) {
+            // localStorage の容量オーバー時はファイル添付メッセージのデータ部だけ落として再試行
+            console.warn('[svc_chat_db] localStorage 容量オーバー。ファイル添付のdata部を破棄して再試行');
+            try {
+                const compact = JSON.parse(JSON.stringify(this.localChatDB));
+                for (const k of Object.keys(compact)) {
+                    const arr = compact[k];
+                    if (!Array.isArray(arr)) continue;
+                    for (const m of arr) {
+                        if (m && m.file && m.file.data) {
+                            // 大きい添付は localStorage では保持できないのでメタだけ残す
+                            // 元データは Firebase にあるので、再アクセス時に取得可能
+                            m.file = { name: m.file.name, type: m.file.type, _dropped: true };
+                        }
+                    }
+                }
+                localStorage.setItem('svc_chat_db', JSON.stringify(compact));
+            } catch (e2) {
+                console.error('[svc_chat_db] 保存失敗:', e2);
+            }
+        }
+    }
+
+    // =====================================================
+    // クラウド（Firebase）からチャット履歴を同期
+    // =====================================================
+    // - ログイン直後にバックグラウンドで呼び出す
+    // - DM: friendNames から会話キーを構築
+    // - グループ: myGroups から会話キーを構築
+    // - 各会話で「ローカルにある最新の ts」以降のメッセージのみ取得して localChatDB にマージ
+    // - 取り込んだ後、UIが既にレンダリングされている画面があれば再描画
+    async _syncChatHistoryFromCloud() {
+        if (!this.myName) return;
+        // 重複実行ガード（短期間に複数回呼ばれても1回だけ）
+        if (this._chatSyncInProgress) return;
+        this._chatSyncInProgress = true;
+
+        try {
+            // 対象の convKey 一覧を作る
+            const convKeys = new Set();
+            if (this.friendNames && this.friendNames.size > 0) {
+                for (const name of this.friendNames) {
+                    if (name && name !== this.myName) convKeys.add(this._dmKey(name));
+                }
+            }
+            // 過去にDMしたことがある相手も含める（フレンド解除されたケース）
+            for (const k of Object.keys(this.localChatDB || {})) {
+                if (k.startsWith('dm:') || k.startsWith('grp:')) convKeys.add(k);
+            }
+            // 自分が所属するグループ
+            if (Array.isArray(this.myGroups)) {
+                for (const g of this.myGroups) {
+                    if (g && g.id) convKeys.add(this._groupKey(g.id));
+                }
+            }
+
+            if (convKeys.size === 0) return;
+
+            // 並列に取得（最大10並列ずつ）
+            const keysArr = Array.from(convKeys);
+            const concurrency = 10;
+            const updatedKeys = new Set();
+            for (let i = 0; i < keysArr.length; i += concurrency) {
+                const batch = keysArr.slice(i, i + concurrency);
+                await Promise.all(batch.map(async (convKey) => {
+                    // ローカルにある最新の ts を求める（差分取得）
+                    const localMsgs = this.localChatDB[convKey] || [];
+                    let latestTs = 0;
+                    for (const m of localMsgs) {
+                        if (m && typeof m.ts === 'number' && m.ts > latestTs) latestTs = m.ts;
+                    }
+                    const remoteMsgs = await FbAPI.fetchChatMessages(convKey, latestTs);
+                    if (!remoteMsgs || remoteMsgs.length === 0) {
+                        // ローカルに無いが Firebase にも無い場合でも、取り消し状態の更新が
+                        // 取り込めるよう、ローカル既存メッセージとの差分マージをかける
+                        // （ローカルのみで存在し、Firebase 上で recalled になっている可能性は
+                        //  別途取得時に判定されるが、ここでは追加メッセージが無い場合スキップ）
+                        return;
+                    }
+                    if (!this.localChatDB[convKey]) this.localChatDB[convKey] = [];
+                    const arr = this.localChatDB[convKey];
+                    // 既存メッセージを msgId でインデックス
+                    const idx = new Map();
+                    for (const m of arr) {
+                        if (m && m.msgId) idx.set(m.msgId, m);
+                    }
+                    let changed = false;
+                    for (const rm of remoteMsgs) {
+                        if (!rm || !rm.msgId) continue;
+                        const existing = idx.get(rm.msgId);
+                        if (existing) {
+                            // 取り消しなどの状態変化を反映
+                            if (rm.recalled && !existing.recalled) {
+                                existing.recalled = true;
+                                existing.content = '';
+                                if (existing.file) delete existing.file;
+                                existing.recalledAt = rm.recalledAt || Date.now();
+                                changed = true;
+                            }
+                        } else {
+                            arr.push(rm);
+                            idx.set(rm.msgId, rm);
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        // ts 昇順に並べ替え
+                        arr.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+                        updatedKeys.add(convKey);
+                    }
+                }));
+            }
+
+            if (updatedKeys.size > 0) {
+                this._saveLocalChatDB();
+                // 開いている画面があれば再描画
+                this._refreshOpenChatViews(updatedKeys);
+                // 未読バッジも再計算
+                try { this._recomputeAllUnreadBadges(); } catch (_) { }
+            }
+
+            // バックグラウンドで保持期限切れのメッセージをFirebaseから削除（90日超）
+            FbAPI.pruneExpiredChats(Array.from(convKeys)).catch(() => { });
+        } catch (e) {
+            console.warn('[_syncChatHistoryFromCloud]', e);
+        } finally {
+            this._chatSyncInProgress = false;
+        }
+    }
+
+    // 取り込んだ会話のうち、開いている画面を再描画
+    _refreshOpenChatViews(updatedKeys) {
+        if (!updatedKeys || updatedKeys.size === 0) return;
+        // DMモーダルが開いていて該当の相手なら再描画
+        try {
+            if (this.el.dmModal?.classList.contains('visible')) {
+                if (this.dmPartner) {
+                    const key = this._dmKey(this.dmPartner);
+                    if (updatedKeys.has(key)) {
+                        this._renderDmMessages(this.dmPartner);
+                    }
+                }
+                // DM会話一覧が表示されている場合
+                this._renderDmConversationList?.();
+            }
+            // グループモーダル
+            if (this.el.groupModal?.classList.contains('visible')) {
+                if (this.currentGroupId) {
+                    const key = this._groupKey(this.currentGroupId);
+                    if (updatedKeys.has(key)) {
+                        this._renderGroupMessages?.(this.currentGroupId);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('[_refreshOpenChatViews]', e);
+        }
     }
     // ---------- 未読状態の永続化 ----------
     _lastReadStorageKey() {
@@ -3221,6 +3421,13 @@ class SecureVideoChat {
         }
         this.localChatDB[key].push(msg);
         this._saveLocalChatDB();
+        // クラウド（Firebase）にも保存。
+        // - 送信者が自分のメッセージのみアップロード（重複防止）
+        // - system メッセージはローカル表示用なので保存しない
+        // - msgId が無いメッセージはキー化できないので保存しない
+        if (msg && msg.msgId && msg.from === this.myName && msg.type !== 'system') {
+            FbAPI.saveChatMessage(key, msg).catch(() => { });
+        }
         return true;
     }
 
@@ -3238,6 +3445,18 @@ class SecureVideoChat {
         if (m.file) delete m.file;
         m.recalledAt = Date.now();
         this._saveLocalChatDB();
+        // クラウドにも反映（送信者本人なら）
+        // 取り消し送信元（自分）と相手（受信側）の両方でこの関数が呼ばれるが、
+        // Firebase に保存されているメッセージの所有は送信者なので、
+        // 送信者のローカルだけで更新を出せば十分。
+        if (m.from === this.myName) {
+            FbAPI.updateChatMessage(convKey, msgId, {
+                recalled: true,
+                content: '',
+                file: null,
+                recalledAt: m.recalledAt
+            }).catch(() => { });
+        }
         return m;
     }
 
@@ -3475,12 +3694,36 @@ class SecureVideoChat {
         if (this.el.newDmFab) this.el.newDmFab.style.display = '';
         this._renderDmConversationList();
     }
-    _startNewDm() {
+    async _startNewDm() {
         const name = this.el.newDmTargetName?.value.trim();
         if (this.el.newDmError) this.el.newDmError.textContent = '';
         if (!name) { if (this.el.newDmError) this.el.newDmError.textContent = '名前を入力してください'; return; }
         if (name === this.myName) { if (this.el.newDmError) this.el.newDmError.textContent = '自分とはDMできません'; return; }
         if (this.blockedUsers.has(name)) { if (this.el.newDmError) this.el.newDmError.textContent = 'ブロック中のユーザーです'; return; }
+
+        // ユーザーが実在するか確認
+        const confirmBtn = this.el.newDmConfirmBtn;
+        const originalHTML = confirmBtn?.innerHTML;
+        if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 確認中...';
+        }
+        try {
+            const exists = await FbAPI._accountExists(name);
+            if (!exists) {
+                if (this.el.newDmError) this.el.newDmError.textContent = 'そのユーザーは存在しません';
+                return;
+            }
+        } catch (e) {
+            if (this.el.newDmError) this.el.newDmError.textContent = '確認に失敗しました。通信状態を確認してください';
+            return;
+        } finally {
+            if (confirmBtn) {
+                confirmBtn.disabled = false;
+                if (originalHTML) confirmBtn.innerHTML = originalHTML;
+            }
+        }
+
         this.el.newDmModal.classList.remove('visible');
         // 既存の会話がなくても会話を開始（メッセージ送信時に自動的にDBに記録される）
         this._openDmChat(name);
@@ -3731,8 +3974,12 @@ class SecureVideoChat {
     // グループチャット
     // =====================================================
     async openGroupModal() {
+        // モーダルを表示する前にリスト状態へリセットしておく
+        // （前回開いた時のグループチャット画面が一瞬見えるのを防ぐ）
+        this._showGroupList();
         this.el.groupModal.classList.add('visible');
         await this._loadGroups();
+        // ロード完了後にもう一度リストを表示（_loadGroupsで状態が変わっている可能性に備える）
         this._showGroupList();
     }
     async _loadGroups() {
@@ -3744,8 +3991,110 @@ class SecureVideoChat {
                 for (const g of this.myGroups) {
                     if (g.avatar) this.groupAvatarCache[g.id] = g.avatar;
                 }
+                // 進行中の通話情報を activeGroupCalls に同期
+                this._syncActiveGroupCallsFromGroups();
+                // 各グループの activeCall をリアルタイム購読（後から開始される通話にも反応）
+                this._subscribeAllGroupActiveCalls();
             }
         } catch (_) { }
+    }
+
+    // myGroups の activeCall を activeGroupCalls Map に反映
+    _syncActiveGroupCallsFromGroups() {
+        if (!this.activeGroupCalls) this.activeGroupCalls = new Map();
+        const validGroupIds = new Set();
+        for (const g of this.myGroups) {
+            validGroupIds.add(g.id);
+            if (g.activeCall && g.activeCall.hostName) {
+                this.activeGroupCalls.set(g.id, {
+                    hostName: g.activeCall.hostName,
+                    hostPeerId: g.activeCall.hostPeerId || null,
+                    groupName: g.name,
+                    startedAt: g.activeCall.startedAt || Date.now()
+                });
+            } else {
+                this.activeGroupCalls.delete(g.id);
+            }
+        }
+        // 自分がもう所属していないグループの entry を消す
+        for (const gid of Array.from(this.activeGroupCalls.keys())) {
+            if (!validGroupIds.has(gid)) this.activeGroupCalls.delete(gid);
+        }
+        // UIに反映
+        this._updateGroupBadge();
+        // 一覧表示中ならインジケータも更新
+        if (this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupListArea?.style.display !== 'none') {
+            this._refreshGroupListCallIndicator();
+        }
+        // チャット開いていればバナーも更新
+        if (this.currentGroupId &&
+            this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupChatArea?.style.display !== 'none') {
+            this._updateGroupCallBanner(this.currentGroupId);
+        }
+    }
+
+    // 全グループの activeCall をリアルタイム購読
+    _subscribeAllGroupActiveCalls() {
+        if (!this.myName) return;
+        const ids = this.myGroups.map(g => g.id).sort();
+        // 既に同じグループIDセットで購読中なら何もしない（毎回購読し直すと、その瞬間の変更を見逃す可能性がある）
+        const newKey = ids.join('|');
+        if (this._activeCallsSubKey === newKey) return;
+        this._activeCallsSubKey = newKey;
+
+        FbAPI.subscribeGroupActiveCalls(this.myName, ids, (groupId, activeCall) => {
+            const group = this.myGroups.find(g => g.id === groupId);
+            if (!group) return;
+
+            const oldEntry = this.activeGroupCalls.get(groupId);
+            if (activeCall && activeCall.hostName) {
+                this.activeGroupCalls.set(groupId, {
+                    hostName: activeCall.hostName,
+                    hostPeerId: activeCall.hostPeerId || null,
+                    groupName: group.name,
+                    startedAt: activeCall.startedAt || Date.now()
+                });
+                group.activeCall = activeCall;
+
+                // 自分が現在この通話に参加中で、かつホストが変わった場合は新ホストに接続を試みる
+                if (this._meshIsInCall() && this.meshGroupId === groupId && !this.meshIsHost) {
+                    const newHostPeerId = activeCall.hostPeerId;
+                    const oldHostPeerId = oldEntry?.hostPeerId;
+                    if (newHostPeerId && newHostPeerId !== oldHostPeerId &&
+                        newHostPeerId !== this.meshMyId) {
+                        // ホストが変わった！新ホストに接続を試みる
+                        this._meshLog('host changed, connecting to new host:', newHostPeerId);
+                        this.meshHostName = activeCall.hostName;
+                        if (!this.meshPeers.has(newHostPeerId)) {
+                            this._meshConnectToPeer(newHostPeerId);
+                        }
+                    }
+                }
+            } else {
+                // 通話終了
+                this.activeGroupCalls.delete(groupId);
+                group.activeCall = null;
+
+                // 自分がこの通話に参加中だった場合、退出処理
+                if (this._meshIsInCall() && this.meshGroupId === groupId && !this.meshIsHost) {
+                    this._meshLog('active call ended on Firebase, leaving');
+                    this._leaveMeshCall(true).catch(() => { });
+                }
+            }
+            // UI反映
+            this._updateGroupBadge();
+            if (this.el.groupModal?.classList.contains('visible') &&
+                this.el.groupListArea?.style.display !== 'none') {
+                this._refreshGroupListCallIndicator();
+            }
+            if (this.currentGroupId === groupId &&
+                this.el.groupModal?.classList.contains('visible') &&
+                this.el.groupChatArea?.style.display !== 'none') {
+                this._updateGroupCallBanner(groupId);
+            }
+        });
     }
     _showGroupList() {
         this.currentGroupId = null;
@@ -3797,6 +4146,8 @@ class SecureVideoChat {
         this.el.groupListArea.querySelectorAll('.dm-conv-item').forEach(el => {
             el.addEventListener('click', () => this._openGroupChat(el.dataset.gid, el.dataset.gname));
         });
+        // 進行中通話のインジケータを反映
+        this._refreshGroupListCallIndicator();
     }
     _openGroupChat(groupId, groupName) {
         this.currentGroupId = groupId;
@@ -3810,6 +4161,8 @@ class SecureVideoChat {
         this.el.groupChatName.textContent = groupName;
         this._renderGroupMessages(groupId);
         if (this.el.groupInput) this.el.groupInput.focus();
+        // 進行中グループ通話バナーを更新
+        this._updateGroupCallBanner(groupId);
     }
     _renderGroupMessages(groupId) {
         const key = this._groupKey(groupId);
@@ -3852,6 +4205,8 @@ class SecureVideoChat {
         try {
             const res = await FbAPI.inviteGroup(this.token, this.currentGroupId, target);
             if (res?.ok) {
+                // 自分のmyGroupsの members も最新化（招待後の members に対象者が追加されているため）
+                try { await this._loadGroups(); } catch (_) { }
                 const group = this.myGroups.find(g => g.id === this.currentGroupId);
                 await FbAPI.sendSignal(this.token, target, 'group_invite', encodeURIComponent(JSON.stringify({ groupId: this.currentGroupId, groupName: this.currentGroupName || group?.name })));
                 this.el.inviteGroupModal.classList.remove('visible');
@@ -3977,9 +4332,17 @@ class SecureVideoChat {
             if (total > 0) {
                 this.el.groupBadge.style.display = 'flex';
                 this.el.groupBadge.textContent = total > 99 ? '99+' : total;
+                this.el.groupBadge.classList.remove('badge-dot');
+            } else if (this.activeGroupCalls && this.activeGroupCalls.size > 0 && !this._meshIsInCall?.()) {
+                // 未読は無いが進行中の通話あり → ドット表示のみ
+                // ただし自分が通話中（1対1含む）のときは表示しない（紛らわしくなるため）
+                this.el.groupBadge.style.display = 'flex';
+                this.el.groupBadge.textContent = '';
+                this.el.groupBadge.classList.add('badge-dot');
             } else {
                 this.el.groupBadge.style.display = 'none';
                 this.el.groupBadge.textContent = '';
+                this.el.groupBadge.classList.remove('badge-dot');
             }
         }
     }
@@ -4427,7 +4790,10 @@ class SecureVideoChat {
             contentHtml = `<span><i class="fas fa-rotate-left recalled-icon"></i>${this.escapeHtml(txt)}</span>`;
         } else if (msg.type === 'file' && msg.file) {
             const f = msg.file;
-            if (f.type?.startsWith('image/')) {
+            if (f._dropped || !f.data) {
+                // 端末容量の都合でファイル本体が削られたケース
+                contentHtml = `<span class="chat-file-dropped"><i class="fas fa-file"></i> ${this.escapeHtml(f.name || 'ファイル')} <small>(端末では非保持)</small></span>`;
+            } else if (f.type?.startsWith('image/')) {
                 contentHtml = `<img src="${f.data}" alt="${this.escapeHtml(f.name)}" class="chat-img-preview" onclick="this.requestFullscreen?.()">`;
             } else if (f.type?.startsWith('video/')) {
                 contentHtml = `<video src="${f.data}" controls class="chat-img-preview"></video>`;
@@ -4487,23 +4853,31 @@ class SecureVideoChat {
     // 音声・映像制御
     // =====================================================
     toggleAudio() {
+        // メッシュ通話中ならメッシュ用に分岐
+        if (this._meshIsInCall && this._meshIsInCall()) {
+            return this._meshToggleMic();
+        }
+        // 待機状態（通話前のプレビュー）：旧式のフラグも更新しておく（次回通話の初期値に反映）
         this.isAudioEnabled = !this.isAudioEnabled;
+        this.meshMicOn = this.isAudioEnabled;
         if (this.localStream) this.localStream.getAudioTracks().forEach(t => t.enabled = this.isAudioEnabled);
         this._syncMediaButtonsUI();
     }
 
     toggleVideo() {
+        if (this._meshIsInCall && this._meshIsInCall()) {
+            return this._meshToggleCam();
+        }
         // 画面共有中はカメラON/OFFトグルを無効化
         if (this.isScreenSharing) {
             this.showNotification('通知', '画面共有中はカメラを切り替えられません', 'warning');
             return;
         }
         this.isVideoEnabled = !this.isVideoEnabled;
+        this.meshCamOn = this.isVideoEnabled;
         if (this.localStream) this.localStream.getVideoTracks().forEach(t => t.enabled = this.isVideoEnabled);
         this._syncMediaButtonsUI();
         this._updateLocalAvatarOverlay();
-        // 相手にカメラ状態を通知（要件2: 相手画面のオーバーレイ切替に使う）
-        this._sendMediaStateToPeer();
     }
 
     // 自分のカメラ/画面共有状態を相手に通知
@@ -4577,104 +4951,20 @@ class SecureVideoChat {
     // 画面共有
     // =====================================================
     async toggleScreenShare() {
-        if (!this.currentCall || !this.currentCall.peerConnection) {
-            this.showNotification('通知', '通話中のみ画面共有できます', 'warning');
-            return;
+        if (this._meshIsInCall && this._meshIsInCall()) {
+            return this._meshToggleScreenShare();
         }
-        if (this.isScreenSharing) {
-            await this._stopScreenShare();
-        } else {
-            await this._startScreenShare();
-        }
+        this.showNotification('通知', '通話中のみ画面共有できます', 'warning');
     }
 
     async _startScreenShare() {
-        if (!navigator.mediaDevices?.getDisplayMedia) {
-            this.showNotification('エラー', 'このブラウザは画面共有に対応していません', 'error');
-            return;
-        }
-        let displayStream;
-        try {
-            displayStream = await navigator.mediaDevices.getDisplayMedia({
-                video: { frameRate: { ideal: 15, max: 30 } },
-                audio: false
-            });
-        } catch (e) {
-            // ユーザーがキャンセル/拒否した
-            console.warn('画面共有キャンセル:', e);
-            return;
-        }
-        const screenTrack = displayStream.getVideoTracks()[0];
-        if (!screenTrack) {
-            this.showNotification('エラー', '画面トラックを取得できませんでした', 'error');
-            return;
-        }
-        // RTCPeerConnection のビデオセンダーを差し替え
-        const pc = this.currentCall.peerConnection;
-        const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (!videoSender) {
-            // 元々ビデオトラックを送っていなかった場合は追加
-            try {
-                pc.addTrack(screenTrack, displayStream);
-            } catch (e) {
-                console.warn('addTrack失敗:', e);
-            }
-        } else {
-            try { await videoSender.replaceTrack(screenTrack); }
-            catch (e) {
-                console.warn('replaceTrack失敗:', e);
-                this.showNotification('エラー', '画面共有の開始に失敗しました', 'error');
-                screenTrack.stop();
-                return;
-            }
-        }
-        // 元のカメラトラックを退避（停止時に戻す）
-        this.savedCameraTrack = this.localStream?.getVideoTracks()[0] || null;
-        // ローカルプレビューも画面に切り替え
-        if (this.el.localVideo) {
-            this.el.localVideo.srcObject = displayStream;
-        }
-        this._screenStream = displayStream;
-        this.isScreenSharing = true;
-        // ユーザがOSのUIから「共有を停止」を押した場合
-        screenTrack.addEventListener('ended', () => {
-            if (this.isScreenSharing) this._stopScreenShare();
-        });
-        this._syncMediaButtonsUI();
-        this._updateLocalAvatarOverlay();
-        // 相手に画面共有開始を通知
-        this._sendMediaStateToPeer();
+        // 旧1対1WebRTC用。メッシュ通話では _meshStartScreenShare を使う
+        console.warn('[deprecated] _startScreenShare called. Use _meshStartScreenShare instead.');
     }
 
     async _stopScreenShare(isCallEnding = false) {
-        // 画面トラック停止
-        if (this._screenStream) {
-            try { this._screenStream.getTracks().forEach(t => t.stop()); } catch (_) { }
-            this._screenStream = null;
-        }
-        this.isScreenSharing = false;
-
-        // 通話が継続中ならカメラトラックに戻す
-        if (!isCallEnding && this.currentCall && this.currentCall.peerConnection) {
-            const pc = this.currentCall.peerConnection;
-            const videoSender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-            const cameraTrack = this.savedCameraTrack && this.savedCameraTrack.readyState === 'live'
-                ? this.savedCameraTrack
-                : (this.localStream?.getVideoTracks()[0] || null);
-            if (videoSender && cameraTrack) {
-                try { await videoSender.replaceTrack(cameraTrack); } catch (e) { console.warn('カメラ復帰失敗:', e); }
-                // カメラトラックの enabled を isVideoEnabled に合わせる
-                cameraTrack.enabled = this.isVideoEnabled === true;
-            }
-            // ローカルプレビューもカメラに戻す
-            if (this.el.localVideo && this.localStream) {
-                this.el.localVideo.srcObject = this.localStream;
-            }
-        }
-        this.savedCameraTrack = null;
-        this._syncMediaButtonsUI();
-        this._updateLocalAvatarOverlay();
-        if (!isCallEnding) this._sendMediaStateToPeer();
+        // 旧1対1WebRTC用。メッシュ通話では _meshStopScreenShare を使う
+        console.warn('[deprecated] _stopScreenShare called. Use _meshStopScreenShare instead.');
     }
 
     toggleVolumeControl() {
@@ -4868,7 +5158,2161 @@ class SecureVideoChat {
             try { this.localStream.getTracks().forEach(t => t.stop()); } catch (_) { }
             this.localStream = null;
         }
+        // メッシュ通話中ならbye送信
+        try { this._meshBroadcastBye(); } catch (_) { }
+        if (this.meshPeer) { try { this.meshPeer.destroy(); } catch (_) { } }
         this.cleanup();
+    }
+
+    // ============================================================
+    // ============================================================
+    //                    メッシュ通話機能
+    //   通話以外はFirebase、通話はPeerJSフルメッシュで行う
+    //   ホストPeerID = meshcall-{ホスト本名}-host
+    //   参加者PeerID = meshcall-{ホスト本名}-{ランダム}
+    //   roomId = ホストの本名 そのまま
+    // ============================================================
+    // ============================================================
+
+    // --- 状態初期化（コンストラクタで呼ばれていない分の補完。重複しても害なし） ---
+    _meshEnsureStateInit() {
+        if (!this.meshPeers) this.meshPeers = new Map();
+        if (!this.outgoingMeshInvitees) this.outgoingMeshInvitees = new Set();
+        if (typeof this.meshIsHost !== 'boolean') this.meshIsHost = false;
+        if (typeof this.meshMicOn !== 'boolean') this.meshMicOn = true;
+        if (typeof this.meshCamOn !== 'boolean') this.meshCamOn = false; // カメラOFFスタート
+        if (typeof this.meshIsScreenSharing !== 'boolean') this.meshIsScreenSharing = false;
+        if (!this.meshSavedCameraTrack) this.meshSavedCameraTrack = null;
+        if (!this.meshGroupId) this.meshGroupId = null; // グループ通話の場合のグループID
+    }
+
+    _meshLog(...args) { console.log('[mesh]', ...args); }
+
+    // --- メッシュ通話中かどうか ---
+    _meshIsInCall() {
+        return !!this.meshPeer;
+    }
+
+    // ====================================================
+    // メッシュ用 localStream
+    // ====================================================
+    async _ensureMeshLocalStream() {
+        // 既存の this.localStream を流用する。なければ新規取得。
+        if (this.localStream) {
+            const tracks = this.localStream.getTracks();
+            const allActive = tracks.length > 0 && tracks.every(t => t.readyState === 'live');
+            if (allActive) {
+                // 状態を反映
+                this.localStream.getAudioTracks().forEach(t => t.enabled = this.meshMicOn);
+                this.localStream.getVideoTracks().forEach(t => t.enabled = this.meshCamOn);
+                return this.localStream;
+            }
+        }
+        try {
+            this.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+            this.localStream.getVideoTracks().forEach(t => t.enabled = this.meshCamOn);
+            this.localStream.getAudioTracks().forEach(t => t.enabled = this.meshMicOn);
+            this.isMediaReady = true;
+        } catch (e) {
+            console.warn('[mesh] カメラ/マイク取得失敗。音声のみで再試行:', e);
+            try {
+                this.localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+                this.localStream.getAudioTracks().forEach(t => t.enabled = this.meshMicOn);
+                this.meshCamOn = false;
+                this.isMediaReady = true;
+            } catch (e2) {
+                this.localStream = null;
+                this.isMediaReady = false;
+                throw e2;
+            }
+        }
+        return this.localStream;
+    }
+
+    // ====================================================
+    // メッシュPeer 起動
+    // ====================================================
+    // _meshInitPeer(roomId, isHost, options?)
+    //   options.isGroupCall: グループ通話の場合 true
+    //   options.groupId: グループID（グループ通話のとき）
+    //   グループ通話の場合、ホストPeerIDも meshcall-grp-{groupId}-{ランダム} とすることで
+    //   ホスト交代時のPeerJS unavailable-id 問題を回避する
+    _meshInitPeer(roomId, isHost, options = {}) {
+        return new Promise((resolve, reject) => {
+            let myMeshPeerId;
+            if (options.isGroupCall && options.groupId) {
+                // グループ通話: ホストも参加者もランダムサフィックス付き
+                // groupId はサニタイズして使用
+                const rand = Math.random().toString(36).slice(2, 10);
+                myMeshPeerId = `meshcall-grp-${this._meshSanitize(options.groupId)}-${rand}`;
+            } else {
+                // 1対1通話: 旧仕様（ホスト = -host、参加者 = ランダム）
+                myMeshPeerId = isHost
+                    ? `meshcall-${this._meshSanitize(roomId)}-host`
+                    : `meshcall-${this._meshSanitize(roomId)}-${Math.random().toString(36).slice(2, 8)}`;
+            }
+            const peer = new Peer(myMeshPeerId, {
+                config: {
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.google.com:19302' },
+                    ]
+                },
+                secure: true,
+                debug: 1
+            });
+
+            let resolved = false;
+            peer.on('open', id => {
+                this.meshPeer = peer;
+                this.meshMyId = id;
+                resolved = true;
+                resolve(peer);
+            });
+
+            peer.on('error', err => {
+                console.error('[mesh] peer error:', err);
+                if (err.type === 'unavailable-id') {
+                    if (!resolved) {
+                        reject(new Error('PeerID衝突。再試行してください'));
+                    }
+                    return;
+                }
+                if (err.type === 'peer-unavailable') {
+                    // 相手が居なくなっただけ。スルー
+                    return;
+                }
+                if (!resolved) {
+                    reject(new Error('メッシュ通話の接続に失敗しました: ' + err.type));
+                }
+            });
+
+            peer.on('call', call => {
+                call.answer(this.localStream);
+                this._meshHandleIncomingCall(call);
+            });
+
+            peer.on('connection', conn => {
+                this._meshSetupDataConnection(conn);
+            });
+
+            peer.on('disconnected', () => {
+                this._meshLog('peer disconnected, attempting reconnect');
+                setTimeout(() => { try { peer.reconnect(); } catch (_) { } }, 2000);
+            });
+
+            setTimeout(() => {
+                if (!resolved) reject(new Error('シグナリングサーバ接続タイムアウト'));
+            }, 15000);
+        });
+    }
+
+    // ルームID（=ホスト本名）に使えるようサニタイズ（PeerJSのIDに使える文字）
+    _meshSanitize(s) {
+        // 日本語/記号も含む本名をbase16でエンコード（PeerJSのID制約は割と緩いが、安全側）
+        try {
+            const enc = new TextEncoder().encode(String(s));
+            return Array.from(enc).map(b => b.toString(16).padStart(2, '0')).join('');
+        } catch (_) {
+            return String(s).replace(/[^a-zA-Z0-9]/g, '');
+        }
+    }
+
+    // ====================================================
+    // 入退室
+    // ====================================================
+    // hostName はホストの本名、isHost = 自分がホストかどうか
+    // groupContext = { groupId, groupName, hostPeerId? } （グループ通話の場合）
+    //   hostPeerId: 参加者の場合は Firebase から取得した既存ホストPeerID（必須）
+    async _startMeshCall({ hostName, isHost, groupContext = null }) {
+        if (this._meshIsInCall()) {
+            this.showNotification('通知', '既に通話中です', 'warning');
+            return false;
+        }
+        this._meshEnsureStateInit();
+        this.meshRoomId = hostName;
+        this.meshHostName = hostName;
+        this.meshIsHost = !!isHost;
+        this.meshGroupId = groupContext?.groupId || null;
+        this.meshGroupName = groupContext?.groupName || null;
+        this.callTargetName = isHost ? null : hostName; // 既存UI互換
+
+        this.updateStatus('カメラ・マイク準備中...');
+        try {
+            await this._ensureMeshLocalStream();
+        } catch (e) {
+            this.showNotification('通知', 'カメラ/マイクの利用が拒否されました。音声・映像なしで通話します。', 'warning');
+        }
+
+        this.updateStatus('通話の準備中...');
+        try {
+            await this._meshInitPeer(hostName, isHost, {
+                isGroupCall: !!this.meshGroupId,
+                groupId: this.meshGroupId
+            });
+        } catch (e) {
+            this.showNotification('エラー', e.message || 'メッシュ通話の開始に失敗しました', 'error');
+            this._meshClearState();
+            return false;
+        }
+
+        // ホストとして起動した場合 + グループ通話なら Firebase に自分のPeerIDを登録
+        if (isHost && this.meshGroupId) {
+            try {
+                const setRes = await FbAPI.setGroupActiveCall(this.token, this.meshGroupId, this.myName, this.meshMyId);
+                if (setRes && setRes.ok) {
+                    // 自分が切断されたら自動で activeCall を削除する予約
+                    await FbAPI.setupActiveCallOnDisconnect(this.meshGroupId);
+                } else {
+                    console.warn('[mesh] setGroupActiveCall not ok:', setRes);
+                }
+            } catch (e) {
+                console.warn('[mesh] setGroupActiveCall failed:', e);
+            }
+        }
+
+        // 画面切り替え
+        this._meshEnterUI();
+
+        // 自分のタイル
+        this._meshEnsureTile(this.meshMyId, true, this.myName);
+        this._meshSetTileStream(this.meshMyId, this.localStream);
+        this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+
+        if (!isHost) {
+            // ホストに接続
+            this.updateStatus('ホストに接続中...');
+            // グループ通話の場合: Firebaseから取得したhostPeerIdを使う
+            // 1対1通話の場合: meshcall-{ホスト本名}-host
+            let hostMeshId;
+            if (this.meshGroupId && groupContext?.hostPeerId) {
+                hostMeshId = groupContext.hostPeerId;
+            } else {
+                hostMeshId = `meshcall-${this._meshSanitize(hostName)}-host`;
+            }
+            this._meshTargetHostPeerId = hostMeshId;
+            // 接続とリトライ
+            this._meshHostConnectAttempt = 0;
+            setTimeout(() => this._meshTryConnectHost(hostMeshId), 500);
+        } else {
+            // ホスト側初期ステータス: グループ通話か1対1で文言を変える
+            if (this.meshGroupId) {
+                this.updateStatus('待機中 - メンバーの参加を待っています');
+            } else {
+                this.updateStatus('待機中 - 招待してください');
+            }
+        }
+
+        return true;
+    }
+
+    // ホストへの接続を試行（タイムアウト時にリトライ）
+    async _meshTryConnectHost(hostPeerId) {
+        if (!this._meshIsInCall()) return;
+        // 既に接続済み（helloを受け取り済み）なら何もしない
+        const existing = this.meshPeers.get(hostPeerId);
+        if (existing && existing.name && existing.name !== '...') {
+            // 既にホストとhelloまで完了している
+            return;
+        }
+        this._meshHostConnectAttempt = (this._meshHostConnectAttempt || 0) + 1;
+        this._meshLog(`ホスト接続試行 #${this._meshHostConnectAttempt}: ${hostPeerId}`);
+
+        // 接続を試みる
+        this._meshConnectToPeer(hostPeerId);
+
+        // 2回目以降のリトライならユーザーに通知
+        if (this._meshHostConnectAttempt === 2) {
+            this.showNotification('通話', 'ホストが交代されたため、接続に少し時間がかかります...', 'info', 3500);
+            this.updateStatus('ホスト交代中 - 接続再試行中...');
+        }
+
+        // 4秒待って、まだ接続が確立されていなければリトライ（旧7秒→4秒に短縮で体感速度向上）
+        clearTimeout(this._meshHostConnectTimeoutId);
+        this._meshHostConnectTimeoutId = setTimeout(async () => {
+            if (!this._meshIsInCall()) return;
+            // 既に接続済みなら何もしない
+            const cur = this.meshPeers.get(hostPeerId);
+            if (cur && cur.name && cur.name !== '...') return;
+
+            // 既存の不完全な接続をクリーンアップ
+            this._meshLog(`ホスト接続タイムアウト: ${hostPeerId}`);
+            if (cur) {
+                if (cur.call) { try { cur.call.close(); } catch (_) { } }
+                if (cur.conn) { try { cur.conn.close(); } catch (_) { } }
+                this.meshPeers.delete(hostPeerId);
+                this._meshRemoveTile(hostPeerId);
+            }
+
+            if (this._meshHostConnectAttempt >= 4) {
+                // 4回試行してもダメ → ゾンビ通話と判断（旧3回→4回に増加、合計約16秒）
+                this._meshLog('ホストへの接続に4回失敗。ゾンビ通話の可能性あり');
+
+                // グループ通話の場合は自動回復: 強制クリア → 自分が新ホストとして引き継ぐ
+                if (this.meshGroupId) {
+                    const groupId = this.meshGroupId;
+                    const groupName = this.meshGroupName;
+
+                    // 現在の通話状態を一度終了
+                    this._meshLog('ゾンビ通話を強制クリアして自分が新ホストとして開始します');
+                    try { await FbAPI.forceClearGroupActiveCall(this.token, groupId); } catch (_) { }
+
+                    // 通話状態をリセット（_leaveMeshCallの軽量版）
+                    if (this.meshPeer) {
+                        try { this.meshPeer.destroy(); } catch (_) { }
+                        this.meshPeer = null;
+                    }
+                    this.meshPeers.clear();
+                    this.meshMyId = null;
+                    this._meshClearState();
+
+                    // 少し待つ（PeerJSサーバー側のID解放）
+                    await new Promise(r => setTimeout(r, 500));
+
+                    // 自分がホストとして再開
+                    this.showNotification('通話', '通話に応答がないため、自分がホストになります', 'info', 2500);
+                    // _startGroupMeshCall を呼ぶと自動的にホストとして起動
+                    this._startGroupMeshCall(groupId).catch(e => {
+                        console.warn('[mesh] ゾンビ通話の回復失敗:', e);
+                        this._meshExitUI();
+                    });
+                    return;
+                }
+
+                // 1対1通話の場合は単純に終了
+                this.showNotification('エラー', 'ホストへの接続に失敗しました。通話を終了します', 'error');
+                this._leaveMeshCall(true).catch(() => { });
+                return;
+            }
+
+            // Firebaseから最新のhostPeerIdを取得して再試行
+            if (this.meshGroupId) {
+                try { await this._loadGroups(); } catch (_) { }
+                const entry = this.activeGroupCalls.get(this.meshGroupId);
+                if (entry?.hostPeerId) {
+                    this._meshTargetHostPeerId = entry.hostPeerId;
+                    this.meshHostName = entry.hostName;
+                    // 新しいhostPeerIdで再試行
+                    this._meshTryConnectHost(entry.hostPeerId);
+                    return;
+                }
+            }
+            // グループ通話以外、または新hostPeerIdが取れなければ同じIDで再試行
+            this._meshTryConnectHost(hostPeerId);
+        }, 4000);
+    }
+
+    // ====================================================
+    // メッシュ通話入室時のUI切替
+    // ====================================================
+    _meshEnterUI() {
+        // 既存videoGrid（2分割）は使わない。meshGridを表示
+        if (this.el.waitingState) this.el.waitingState.style.display = 'none';
+        if (this.el.videoGrid) this.el.videoGrid.style.display = 'none';
+        if (this.el.callControls) this.el.callControls.style.display = '';
+        this.showUserListSection(false);
+
+        // meshGridを表示
+        const meshGrid = document.getElementById('videoMeshGrid');
+        if (meshGrid) {
+            meshGrid.style.display = '';
+            meshGrid.innerHTML = '';
+            meshGrid.dataset.count = '0';
+        }
+
+        // 招待ボタンを表示
+        this._meshUpdateInviteButtonVisibility();
+
+        // remoteName欄にルーム情報を表示（旧UIだが残置）
+        if (this.el.remoteName) {
+            if (this.meshGroupName) {
+                this.el.remoteName.textContent = `[グループ] ${this.meshGroupName}`;
+            } else {
+                this.el.remoteName.textContent = this.meshIsHost ? `ホスト: あなた` : `ホスト: ${this.meshHostName}`;
+            }
+        }
+
+        // マイク/カメラ/画面共有ボタンの状態を反映
+        this._meshSyncControlButtonsUI();
+
+        // 初期ステータス
+        this._meshUpdateCallStatus();
+
+        // グループ通話バナーが見えていれば更新（自分がそのグループの通話に参加した）
+        if (this.meshGroupId) {
+            this._updateGroupCallBanner(this.meshGroupId);
+        }
+
+        // ヘッダグループバッジ（通話進行中のドット表示）も更新
+        this._updateGroupBadge();
+    }
+
+    _meshUpdateInviteButtonVisibility() {
+        const btn = document.getElementById('meshInviteBtn');
+        if (!btn) return;
+        // グループ通話中は招待ボタンを隠す（グループメンバーは自分で参加できるため）
+        // 1対1通話中のみ招待ボタンを表示
+        if (this._meshIsInCall() && !this.meshGroupId) {
+            btn.style.display = '';
+        } else {
+            btn.style.display = 'none';
+        }
+    }
+
+    // ====================================================
+    // 着信通話の処理
+    // ====================================================
+    _meshHandleIncomingCall(call) {
+        const remoteId = call.peer;
+        let info = this.meshPeers.get(remoteId);
+        if (!info) {
+            info = { call: null, conn: null, name: '...', stream: null, micOn: true, camOn: false };
+            this.meshPeers.set(remoteId, info);
+        }
+        info.call = call;
+        this._meshEnsureTile(remoteId, false, info.name);
+
+        call.on('stream', stream => {
+            info.stream = stream;
+            this._meshSetTileStream(remoteId, stream);
+        });
+        call.on('close', () => this._meshCleanupPeer(remoteId));
+        call.on('error', err => console.error('[mesh] call error:', err));
+    }
+
+    // ====================================================
+    // データ接続
+    // ====================================================
+    _meshSetupDataConnection(conn) {
+        const remoteId = conn.peer;
+        let info = this.meshPeers.get(remoteId);
+        if (!info) {
+            info = { call: null, conn: null, name: '...', stream: null, micOn: true, camOn: false };
+            this.meshPeers.set(remoteId, info);
+        }
+        info.conn = conn;
+
+        conn.on('open', () => {
+            // 自己紹介を送信
+            try {
+                conn.send({
+                    type: 'hello',
+                    name: this.myName,
+                    micOn: this.meshMicOn,
+                    camOn: this.meshCamOn,
+                    screenSharing: !!this.meshIsScreenSharing
+                });
+            } catch (_) { }
+            // ホストの場合は他参加者リストを送信
+            if (this.meshIsHost) {
+                const peerList = [...this.meshPeers.keys()].filter(id => id !== remoteId);
+                try { conn.send({ type: 'peer-list', peers: peerList }); } catch (_) { }
+            }
+        });
+
+        conn.on('data', data => this._meshHandleData(remoteId, data));
+        conn.on('close', () => this._meshCleanupPeer(remoteId));
+    }
+
+    _meshHandleData(remoteId, data) {
+        const info = this.meshPeers.get(remoteId);
+        if (!info || !data) return;
+
+        switch (data.type) {
+            case 'hello':
+                info.name = data.name || '匿名';
+                info.micOn = data.micOn !== false;
+                info.camOn = data.camOn === true;
+                info.screenSharing = !!data.screenSharing;
+                this._meshEnsureTile(remoteId, false, info.name);
+                this._meshSetTileName(remoteId, info.name);
+                this._meshSetTileStatus(remoteId, info.micOn, info.camOn);
+                // 「参加しました」トーストは表示しない（タイルの追加だけで参加が分かる）
+                // 着信モーダルなどが残っていれば閉じる（自分が招待した人が入ってきたケース）
+                this.outgoingMeshInvitees.delete(info.name);
+                // ホスト接続成功ならホスト接続タイムアウトをクリア
+                if (remoteId === this._meshTargetHostPeerId) {
+                    clearTimeout(this._meshHostConnectTimeoutId);
+                    this._meshHostConnectTimeoutId = null;
+                    this._meshHostConnectAttempt = 0;
+                }
+                // ステータス更新
+                this._meshUpdateCallStatus();
+                break;
+            case 'peer-list':
+                // ホストから他参加者を受け取った → それぞれに接続
+                (data.peers || []).forEach(pid => {
+                    if (pid !== this.meshMyId && !this.meshPeers.has(pid)) {
+                        this._meshConnectToPeer(pid);
+                    }
+                });
+                break;
+            case 'state':
+                info.micOn = data.micOn !== false;
+                info.camOn = data.camOn === true;
+                info.screenSharing = !!data.screenSharing;
+                this._meshSetTileStatus(remoteId, info.micOn, info.camOn);
+                break;
+            case 'bye':
+                this._meshCleanupPeer(remoteId);
+                break;
+            case 'host-handover':
+                // ホストが退出する直前に、新ホスト候補を全員に通知
+                // data: { newHostName }
+                this._onMeshHostHandover(data, remoteId);
+                break;
+        }
+    }
+
+    // ホスト譲渡通知を受信した
+    // - 自分が newHostName なら新ホストに昇格（新Peer立ち上げ＋Firebase更新）
+    // - そうでなければ、Firebase の activeCall.hostPeerId 更新を待つ（subscribeで反映される）
+    async _onMeshHostHandover(data, fromRemoteId) {
+        if (!this._meshIsInCall() || !this.meshGroupId) return;
+        const newHostName = data?.newHostName;
+        if (!newHostName) return;
+
+        // 旧ホスト名を更新（後でFirebase反映を待たずに表示などに使う）
+        this.meshHostName = newHostName;
+
+        if (newHostName === this.myName) {
+            // 自分が新ホストとして昇格する
+            await this._meshPromoteToHost();
+        }
+        // 他のメンバーは Firebase の activeCall.hostPeerId の更新を待つ
+    }
+
+    // 自分が新ホストに昇格する: 既存のmeshPeerを破棄して新規Peerを立ち上げ、Firebaseに登録、全員に通知
+    async _meshPromoteToHost() {
+        if (!this.meshGroupId) return;
+        this._meshLog('promoting self to host');
+        // ホスト切替の表示はしない（ユーザーには気付かれないようにシームレスに）
+
+        // 既存の参加者全員に bye を送信（旧PeerIDのタイル・接続をクリーンアップしてもらう）
+        try { this._meshBroadcastBye(); } catch (_) { }
+
+        // 既存のPeerを破棄
+        if (this.meshPeer) {
+            try { this.meshPeer.destroy(); } catch (_) { }
+            this.meshPeer = null;
+        }
+        // 既存のmeshPeersをクリア（call/connはdestroyで切れる）
+        const oldMyId = this.meshMyId;
+        this.meshPeers.forEach(info => {
+            if (info.call) { try { info.call.close(); } catch (_) { } }
+            if (info.conn) { try { info.conn.close(); } catch (_) { } }
+        });
+        this.meshPeers.clear();
+
+        // 自分のタイルも作り直し（PeerIDが変わるため）
+        if (oldMyId) this._meshRemoveTile(oldMyId);
+
+        // 少し待つ（PeerJSサーバー上の旧PeerIDが解放される時間 + bye受信処理時間）
+        await new Promise(r => setTimeout(r, 600));
+
+        // 新規にホストPeerを起動（グループ通話なのでランダムサフィックス付き → unavailable-id問題なし）
+        this.meshIsHost = true;
+        this.meshHostName = this.myName;
+        try {
+            await this._meshInitPeer(this.meshHostName, true, {
+                isGroupCall: true,
+                groupId: this.meshGroupId
+            });
+        } catch (e) {
+            console.warn('[mesh] ホスト昇格失敗:', e);
+            this.showNotification('エラー', 'ホスト交代に失敗しました。通話を終了します', 'error');
+            this._leaveMeshCall(true).catch(() => { });
+            return;
+        }
+
+        // 自分のタイルを再作成（新PeerID で）
+        this._meshEnsureTile(this.meshMyId, true, this.myName);
+        this._meshSetTileStream(this.meshMyId, this.localStream);
+        this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+
+        // Firebase の activeCall を新ホスト情報で更新（他メンバーは購読で気付いて自分に繋ぎ直す）
+        try {
+            const res = await FbAPI.updateGroupCallHost(this.token, this.meshGroupId, this.myName, this.meshMyId);
+            if (!res.ok) {
+                console.warn('[mesh] updateGroupCallHost failed:', res.error);
+            }
+            // 新ホストも onDisconnect 予約を設定
+            await FbAPI.setupActiveCallOnDisconnect(this.meshGroupId);
+        } catch (e) {
+            console.warn('[mesh] updateGroupCallHost error:', e);
+        }
+
+        // 自分の activeGroupCalls エントリも更新
+        this.activeGroupCalls.set(this.meshGroupId, {
+            hostName: this.myName,
+            hostPeerId: this.meshMyId,
+            groupName: this.meshGroupName,
+            startedAt: Date.now()
+        });
+
+        // 「ホストを引き継ぎました」トーストは表示しない（ユーザー要望）
+        this._meshUpdateCallStatus();
+        if (this.meshGroupId) this._updateGroupCallBanner(this.meshGroupId);
+    }
+
+    _meshOriginalHandleDataPlaceholder() {
+        // (no-op)
+    }
+
+    // ====================================================
+    // 他peerへ接続
+    // ====================================================
+    _meshConnectToPeer(remotePeerId) {
+        if (!remotePeerId || remotePeerId === this.meshMyId) return;
+        if (this.meshPeers.has(remotePeerId) && this.meshPeers.get(remotePeerId).conn) return;
+
+        const conn = this.meshPeer.connect(remotePeerId, { reliable: true });
+        this._meshSetupDataConnection(conn);
+
+        const call = this.meshPeer.call(remotePeerId, this.localStream || undefined);
+        if (call) {
+            let info = this.meshPeers.get(remotePeerId);
+            if (!info) {
+                info = { call: null, conn: null, name: '...', stream: null, micOn: true, camOn: false };
+                this.meshPeers.set(remotePeerId, info);
+            }
+            info.call = call;
+            this._meshEnsureTile(remotePeerId, false, info.name);
+
+            call.on('stream', stream => {
+                info.stream = stream;
+                this._meshSetTileStream(remotePeerId, stream);
+            });
+            call.on('close', () => this._meshCleanupPeer(remotePeerId));
+            call.on('error', err => console.error('[mesh] call error:', err));
+        }
+    }
+
+    _meshCleanupPeer(peerId) {
+        const info = this.meshPeers.get(peerId);
+        if (info) {
+            if (info.call) { try { info.call.close(); } catch (_) { } }
+            if (info.conn) { try { info.conn.close(); } catch (_) { } }
+            // 「退出しました」トーストは表示しない（タイルの消失だけで退出が分かる）
+            this.meshPeers.delete(peerId);
+        }
+        this._meshRemoveTile(peerId);
+        // ステータス更新
+        this._meshUpdateCallStatus();
+    }
+
+    _meshBroadcastState() {
+        const msg = {
+            type: 'state',
+            micOn: this.meshMicOn,
+            camOn: this.meshCamOn,
+            screenSharing: !!this.meshIsScreenSharing
+        };
+        this.meshPeers.forEach(info => {
+            if (info.conn && info.conn.open) {
+                try { info.conn.send(msg); } catch (_) { }
+            }
+        });
+    }
+
+    _meshBroadcastBye() {
+        if (!this.meshPeer) return;
+        this.meshPeers.forEach(info => {
+            if (info.conn && info.conn.open) {
+                try { info.conn.send({ type: 'bye' }); } catch (_) { }
+            }
+        });
+    }
+
+    // 通話人数に応じてステータスを更新する
+    _meshUpdateCallStatus() {
+        if (!this._meshIsInCall()) return;
+        // 接続済みの参加者数（hello を受信して名前が確定した人）
+        let connectedCount = 0;
+        this.meshPeers.forEach(info => {
+            if (info.name && info.name !== '...') connectedCount++;
+        });
+        const total = connectedCount + 1; // 自分を含めた人数
+        if (total >= 2) {
+            // ラベル文言: グループ通話なら "通話中 - グループ:○○ (N人)"
+            if (this.meshGroupName) {
+                this.updateStatus(`通話中 - ${this.meshGroupName} (${total}人)`);
+            } else {
+                this.updateStatus(`通話中 (${total}人)`);
+            }
+        } else {
+            // 1人だけ（=待機中）
+            if (this.meshIsHost) {
+                if (this.meshGroupId) {
+                    this.updateStatus('待機中 - メンバーの参加を待っています');
+                } else {
+                    this.updateStatus('待機中 - 招待してください');
+                }
+            } else {
+                this.updateStatus('ホストに接続中...');
+            }
+        }
+    }
+
+    // ====================================================
+    // タイル管理
+    // ====================================================
+    _meshEnsureTile(peerId, isSelf, name) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return null;
+        let tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (tile) return tile;
+
+        tile = document.createElement('div');
+        tile.className = 'mesh-tile' + (isSelf ? ' self' : '');
+        tile.dataset.mtile = peerId;
+        const initial = (name || '?').charAt(0).toUpperCase();
+        tile.innerHTML = `
+            <video autoplay playsinline ${isSelf ? 'muted' : ''}></video>
+            <div class="mesh-no-video">
+                <div class="mesh-no-video-circle"><span>${this._escapeHtml(initial)}</span></div>
+            </div>
+            <div class="mesh-tile-label">
+                <span class="mesh-tile-name">${this._escapeHtml(name || '...')}</span>${isSelf ? ' <span class="mesh-tile-you">(あなた)</span>' : ''}
+            </div>
+            <div class="mesh-tile-status"></div>
+            <button class="mesh-tile-pin-btn" title="ピン留め" tabindex="-1"><i class="fas fa-thumbtack"></i></button>
+        `;
+        // アバター画像を反映
+        try {
+            const av = this.avatarCache?.[name];
+            if (av) {
+                const circle = tile.querySelector('.mesh-no-video-circle');
+                if (circle) {
+                    circle.innerHTML = `<img src="${av}" alt="">`;
+                }
+            }
+        } catch (_) { }
+        // ピン留め: 右クリック / ピンボタンクリック / ダブルクリック
+        tile.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            this._meshShowPinMenu(peerId, e.clientX, e.clientY);
+        });
+        tile.addEventListener('dblclick', () => {
+            this._meshTogglePin(peerId);
+        });
+        const pinBtn = tile.querySelector('.mesh-tile-pin-btn');
+        if (pinBtn) {
+            pinBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this._meshTogglePin(peerId);
+            });
+        }
+
+        grid.appendChild(tile);
+        this._meshUpdateGridCount();
+        this._meshApplyPinState();
+        return tile;
+    }
+
+    // タイル数だけでなく、ピン留め状態も再計算してグリッドに反映
+    _meshApplyPinState() {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const pinnedId = this._meshPinnedPeerId;
+        // pinned が存在しない場合は解除
+        if (pinnedId) {
+            const existingPinned = grid.querySelector(`[data-mtile="${CSS.escape(pinnedId)}"]`);
+            if (!existingPinned) {
+                this._meshPinnedPeerId = null;
+            }
+        }
+        // 全タイルからpinnedクラスを外す
+        grid.querySelectorAll('.mesh-tile').forEach(t => t.classList.remove('pinned'));
+        if (this._meshPinnedPeerId) {
+            const t = grid.querySelector(`[data-mtile="${CSS.escape(this._meshPinnedPeerId)}"]`);
+            if (t) {
+                t.classList.add('pinned');
+                grid.dataset.pinned = 'true';
+                // ピン留めタイルを先頭に移動
+                grid.insertBefore(t, grid.firstChild);
+                return;
+            }
+        }
+        delete grid.dataset.pinned;
+    }
+
+    // ピン留めをトグル
+    _meshTogglePin(peerId) {
+        if (this._meshPinnedPeerId === peerId) {
+            this._meshPinnedPeerId = null;
+        } else {
+            this._meshPinnedPeerId = peerId;
+        }
+        this._meshApplyPinState();
+        this._meshHidePinMenu();
+    }
+
+    // 右クリックメニュー表示
+    _meshShowPinMenu(peerId, x, y) {
+        let menu = document.getElementById('meshPinMenu');
+        if (!menu) {
+            menu = document.createElement('div');
+            menu.id = 'meshPinMenu';
+            menu.className = 'mesh-pin-menu';
+            document.body.appendChild(menu);
+            // 外をクリックで閉じる
+            document.addEventListener('click', () => this._meshHidePinMenu());
+            document.addEventListener('contextmenu', (e) => {
+                if (!menu.contains(e.target)) this._meshHidePinMenu();
+            });
+        }
+        const isPinned = this._meshPinnedPeerId === peerId;
+        menu.innerHTML = `
+            <button class="mesh-pin-menu-item" data-action="${isPinned ? 'unpin' : 'pin'}">
+                <i class="fas fa-thumbtack"></i> ${isPinned ? 'ピン留めを解除' : 'ピン留めして拡大表示'}
+            </button>
+        `;
+        menu.style.display = 'block';
+        // 画面端で見切れない位置調整
+        const w = 200, h = 50;
+        const vw = window.innerWidth, vh = window.innerHeight;
+        const left = Math.min(x, vw - w - 8);
+        const top = Math.min(y, vh - h - 8);
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+        const btn = menu.querySelector('button');
+        if (btn) {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                this._meshTogglePin(peerId);
+            };
+        }
+    }
+
+    _meshHidePinMenu() {
+        const menu = document.getElementById('meshPinMenu');
+        if (menu) menu.style.display = 'none';
+    }
+
+    _meshRemoveTile(peerId) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (tile) tile.remove();
+        // 削除されたタイルがピン留め対象だったら解除
+        if (this._meshPinnedPeerId === peerId) {
+            this._meshPinnedPeerId = null;
+        }
+        this._meshUpdateGridCount();
+        this._meshApplyPinState();
+    }
+
+    _meshUpdateGridCount() {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const n = grid.children.length;
+        grid.dataset.count = String(n);
+    }
+
+    _meshSetTileStream(peerId, stream) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (!tile) return;
+        const video = tile.querySelector('video');
+        if (video && video.srcObject !== stream) {
+            video.srcObject = stream;
+        }
+        this._meshRefreshTileVideoState(peerId);
+    }
+
+    _meshSetTileName(peerId, name) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (!tile) return;
+        const nameEl = tile.querySelector('.mesh-tile-name');
+        if (nameEl) nameEl.textContent = name || '...';
+        // アバター
+        try {
+            const av = this.avatarCache?.[name];
+            const circle = tile.querySelector('.mesh-no-video-circle');
+            if (circle) {
+                if (av) circle.innerHTML = `<img src="${av}" alt="">`;
+                else circle.innerHTML = `<span>${this._escapeHtml((name || '?').charAt(0).toUpperCase())}</span>`;
+            }
+        } catch (_) { }
+    }
+
+    _meshSetTileStatus(peerId, micOn, camOn) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (!tile) return;
+        const statusEl = tile.querySelector('.mesh-tile-status');
+        if (statusEl) {
+            statusEl.innerHTML = '';
+            if (!micOn) {
+                statusEl.innerHTML += `<div class="mesh-status-icon muted" title="ミュート"><i class="fas fa-microphone-slash"></i></div>`;
+            }
+        }
+        const overlay = tile.querySelector('.mesh-no-video');
+        const video = tile.querySelector('video');
+        if (camOn) {
+            if (overlay) overlay.style.display = 'none';
+            if (video) video.style.opacity = '1';
+        } else {
+            if (overlay) overlay.style.display = 'flex';
+            if (video) video.style.opacity = '0';
+        }
+    }
+
+    _meshRefreshTileVideoState(peerId) {
+        const grid = document.getElementById('videoMeshGrid');
+        if (!grid) return;
+        const tile = grid.querySelector(`[data-mtile="${CSS.escape(peerId)}"]`);
+        if (!tile) return;
+        const video = tile.querySelector('video');
+        const stream = video?.srcObject;
+        if (!stream) return;
+        const v = stream.getVideoTracks()[0];
+        const a = stream.getAudioTracks()[0];
+        const camOn = v && v.enabled && !v.muted;
+        const micOn = a && a.enabled && !a.muted;
+        // 相手情報を優先（hello/state で受け取った camOn/micOn を使う）
+        const info = this.meshPeers.get(peerId);
+        const finalMic = info ? info.micOn : micOn;
+        const finalCam = info ? info.camOn : camOn;
+        this._meshSetTileStatus(peerId, finalMic, finalCam);
+    }
+
+    // ====================================================
+    // 退出
+    // ====================================================
+    async _leaveMeshCall(silent = false) {
+        if (!this._meshIsInCall()) return;
+        if (!silent) {
+            const ok = confirm('通話から退出しますか？');
+            if (!ok) return;
+        }
+
+        // グループ通話のホストが退出する場合の処理
+        const wasGroupCall = !!this.meshGroupId;
+        const wasHost = this.meshIsHost;
+        const wasGroupId = this.meshGroupId;
+
+        // ホスト譲渡の判定: グループ通話で自分がホストで残メンバーがいる場合は譲渡
+        let didHandover = false;
+        if (wasGroupCall && wasHost && wasGroupId && this.meshPeers.size > 0) {
+            // 残メンバーから新ホスト候補を選定
+            // 選定基準: 名前が確定済みのメンバーの中で、名前の辞書順で最初の人
+            const candidates = [];
+            this.meshPeers.forEach((info, pid) => {
+                if (info.name && info.name !== '...' && info.conn && info.conn.open) {
+                    candidates.push({ pid, name: info.name });
+                }
+            });
+            if (candidates.length > 0) {
+                candidates.sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+                const newHost = candidates[0];
+                // 全員に host-handover を送信
+                this.meshPeers.forEach(info => {
+                    if (info.conn && info.conn.open) {
+                        try { info.conn.send({ type: 'host-handover', newHostName: newHost.name }); } catch (_) { }
+                    }
+                });
+                // 自分の onDisconnect 予約をキャンセル（自分が退出しても activeCall を消さない）
+                // 新ホストB が自分の onDisconnect を新たに予約済み
+                try { await FbAPI.cancelActiveCallOnDisconnect(wasGroupId); } catch (_) { }
+
+                didHandover = true;
+                this._meshLog('host handover to', newHost.name);
+                // 譲渡シグナルがネットワークを伝わるまで少し待つ（800ms）
+                await new Promise(r => setTimeout(r, 800));
+            }
+        }
+
+        // 通話終了通知（譲渡しなかった or 譲渡対象がいない場合のみ）
+        if (wasGroupCall && wasHost && wasGroupId && !didHandover) {
+            const group = this.myGroups.find(g => g.id === wasGroupId);
+            if (group) {
+                const otherMembers = (group.members || []).filter(m => m !== this.myName);
+                const endPayload = encodeURIComponent(JSON.stringify({ groupId: wasGroupId }));
+                for (const member of otherMembers) {
+                    try {
+                        await FbAPI.sendSignal(this.token, member, 'group_call_end', endPayload);
+                    } catch (_) { }
+                }
+            }
+            // Firebase上の進行中通話を削除（ログイン中でないメンバーに対しても反映）
+            try { await FbAPI.clearGroupActiveCall(this.token, wasGroupId); } catch (_) { }
+            // 自分のactiveGroupCallsからも削除
+            this.activeGroupCalls.delete(wasGroupId);
+        }
+
+        // 全員にbye送信
+        try { this._meshBroadcastBye(); } catch (_) { }
+        // 招待中の相手にもキャンセル通知
+        if (this.outgoingMeshInvitees && this.outgoingMeshInvitees.size > 0) {
+            for (const name of Array.from(this.outgoingMeshInvitees)) {
+                try {
+                    await FbAPI.sendSignal(this.token, name, 'mesh_invite_cancel',
+                        encodeURIComponent(JSON.stringify({ roomId: this.meshRoomId })));
+                } catch (_) { }
+            }
+            this.outgoingMeshInvitees.clear();
+        }
+        // peer破棄
+        try {
+            this.meshPeers.forEach(info => {
+                if (info.call) { try { info.call.close(); } catch (_) { } }
+                if (info.conn) { try { info.conn.close(); } catch (_) { } }
+            });
+        } catch (_) { }
+        this.meshPeers.clear();
+        if (this.meshPeer) {
+            try { this.meshPeer.destroy(); } catch (_) { }
+        }
+        this.meshPeer = null;
+        this.meshMyId = null;
+
+        // 画面共有解除
+        if (this.meshIsScreenSharing) {
+            try { await this._meshStopScreenShare(); } catch (_) { }
+        }
+
+        this._meshClearState();
+        this._meshExitUI();
+
+        // 退出後、グループチャットを開いていたらバナー更新
+        if (wasGroupCall && wasGroupId &&
+            this.currentGroupId === wasGroupId &&
+            this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupChatArea?.style.display !== 'none') {
+            this._updateGroupCallBanner(wasGroupId);
+        }
+        this._refreshGroupListCallIndicator();
+        this._updateGroupBadge();
+    }
+
+    _meshClearState() {
+        this.meshRoomId = null;
+        this.meshHostName = null;
+        this.meshIsHost = false;
+        this.meshGroupId = null;
+        this.meshGroupName = null;
+        this.meshIsScreenSharing = false;
+        this.meshSavedCameraTrack = null;
+        this._meshTargetHostPeerId = null;
+        if (this._meshHostConnectTimeoutId) {
+            clearTimeout(this._meshHostConnectTimeoutId);
+            this._meshHostConnectTimeoutId = null;
+        }
+        this._meshHostConnectAttempt = 0;
+        if (this.outgoingMeshInvitees) this.outgoingMeshInvitees.clear();
+        // メディア状態をリセット（カメラOFF/マイクON）
+        this.meshMicOn = true;
+        this.meshCamOn = false;
+        if (this.localStream) {
+            try {
+                this.localStream.getAudioTracks().forEach(t => t.enabled = true);
+                this.localStream.getVideoTracks().forEach(t => t.enabled = false);
+            } catch (_) { }
+        }
+    }
+
+    _meshExitUI() {
+        const meshGrid = document.getElementById('videoMeshGrid');
+        if (meshGrid) {
+            meshGrid.innerHTML = '';
+            meshGrid.style.display = 'none';
+            delete meshGrid.dataset.pinned;
+        }
+        if (this.el.videoGrid) this.el.videoGrid.style.display = 'none';
+        if (this.el.waitingState) this.el.waitingState.style.display = '';
+        if (this.el.callControls) this.el.callControls.style.display = 'none';
+        this.showUserListSection(true);
+        this._meshUpdateInviteButtonVisibility();
+        this.callTargetName = null;
+        this._meshPinnedPeerId = null;
+        this._meshHidePinMenu();
+        this.updateStatus('オンライン');
+        // ボタン状態を初期に戻す
+        this._meshSyncControlButtonsUI();
+        // 通話終了後はグループバッジを更新（通話進行中インジケータの再評価）
+        this._updateGroupBadge();
+    }
+
+    _meshSyncControlButtonsUI() {
+        // 既存のtoggleMic/toggleVideoボタンを流用する
+        if (this.el.toggleMicButton) {
+            this.el.toggleMicButton.classList.toggle('active', !this.meshMicOn);
+            const icon = this.el.toggleMicButton.querySelector('i');
+            if (icon) icon.className = this.meshMicOn ? 'fas fa-microphone' : 'fas fa-microphone-slash';
+        }
+        if (this.el.toggleVideoButton) {
+            this.el.toggleVideoButton.classList.toggle('active', !this.meshCamOn);
+            const icon = this.el.toggleVideoButton.querySelector('i');
+            if (icon) icon.className = this.meshCamOn ? 'fas fa-video' : 'fas fa-video-slash';
+        }
+        if (this.el.screenShareButton) {
+            this.el.screenShareButton.classList.toggle('sharing', !!this.meshIsScreenSharing);
+            const icon = this.el.screenShareButton.querySelector('i');
+            if (icon) icon.className = this.meshIsScreenSharing ? 'fas fa-stop' : 'fas fa-desktop';
+            this.el.screenShareButton.title = this.meshIsScreenSharing ? '画面共有を停止' : '画面共有';
+        }
+    }
+
+    // ====================================================
+    // マイク/カメラ/画面共有（メッシュ版）
+    // ====================================================
+    _meshToggleMic() {
+        this.meshMicOn = !this.meshMicOn;
+        if (this.localStream) {
+            this.localStream.getAudioTracks().forEach(t => t.enabled = this.meshMicOn);
+        }
+        this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+        this._meshSyncControlButtonsUI();
+        this._meshBroadcastState();
+    }
+
+    _meshToggleCam() {
+        // 画面共有中はカメラトグル不可
+        if (this.meshIsScreenSharing) {
+            this.showNotification('通知', '画面共有中はカメラを切り替えできません', 'warning');
+            return;
+        }
+        this.meshCamOn = !this.meshCamOn;
+        if (this.localStream) {
+            this.localStream.getVideoTracks().forEach(t => t.enabled = this.meshCamOn);
+        }
+        this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+        this._meshSyncControlButtonsUI();
+        this._meshBroadcastState();
+    }
+
+    // 画面共有: 全meshPeer に対して replaceTrack
+    async _meshToggleScreenShare() {
+        if (this.meshIsScreenSharing) {
+            await this._meshStopScreenShare();
+        } else {
+            await this._meshStartScreenShare();
+        }
+    }
+
+    async _meshStartScreenShare() {
+        try {
+            const dispStream = await navigator.mediaDevices.getDisplayMedia({
+                video: { cursor: 'always' },
+                audio: false
+            });
+            const screenTrack = dispStream.getVideoTracks()[0];
+            if (!screenTrack) return;
+
+            // 既存のカメラトラックを退避
+            const oldVideoTrack = this.localStream?.getVideoTracks()[0] || null;
+            this.meshSavedCameraTrack = oldVideoTrack;
+
+            // localStreamのビデオトラックを差し替え
+            if (this.localStream) {
+                if (oldVideoTrack) this.localStream.removeTrack(oldVideoTrack);
+                this.localStream.addTrack(screenTrack);
+            } else {
+                this.localStream = dispStream;
+            }
+
+            // 全peerに対して replaceTrack
+            this.meshPeers.forEach(info => {
+                if (info.call && info.call.peerConnection) {
+                    const senders = info.call.peerConnection.getSenders();
+                    const vSender = senders.find(s => s.track && s.track.kind === 'video');
+                    if (vSender) {
+                        try { vSender.replaceTrack(screenTrack); } catch (_) { }
+                    } else {
+                        // 新規追加
+                        try { info.call.peerConnection.addTrack(screenTrack, this.localStream); } catch (_) { }
+                    }
+                }
+            });
+
+            // 自分のタイル映像を差し替え
+            this._meshSetTileStream(this.meshMyId, this.localStream);
+
+            this.meshIsScreenSharing = true;
+            this.meshCamOn = true; // 画面共有中はビデオが流れているのでcamOn扱い
+            screenTrack.onended = () => { this._meshStopScreenShare().catch(() => { }); };
+
+            this._meshSyncControlButtonsUI();
+            this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+            this._meshBroadcastState();
+        } catch (e) {
+            console.warn('[mesh] screenshare cancelled or failed:', e);
+        }
+    }
+
+    async _meshStopScreenShare() {
+        if (!this.meshIsScreenSharing) return;
+        // 退避していたカメラトラックがあるなら戻す。なければ新規取得。
+        let cameraTrack = this.meshSavedCameraTrack;
+        if (!cameraTrack || cameraTrack.readyState === 'ended') {
+            try {
+                const camStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+                cameraTrack = camStream.getVideoTracks()[0];
+            } catch (_) {
+                cameraTrack = null;
+            }
+        }
+
+        // 現在のlocalStreamの画面共有トラックを除去
+        if (this.localStream) {
+            const cur = this.localStream.getVideoTracks()[0];
+            if (cur) {
+                try { cur.stop(); } catch (_) { }
+                this.localStream.removeTrack(cur);
+            }
+            if (cameraTrack) {
+                cameraTrack.enabled = false; // カメラOFFに戻す
+                this.localStream.addTrack(cameraTrack);
+            }
+        }
+
+        // 全peerに対して replaceTrack
+        this.meshPeers.forEach(info => {
+            if (info.call && info.call.peerConnection) {
+                const senders = info.call.peerConnection.getSenders();
+                const vSender = senders.find(s => s.track && s.track.kind === 'video');
+                if (vSender) {
+                    try { vSender.replaceTrack(cameraTrack || null); } catch (_) { }
+                }
+            }
+        });
+
+        this._meshSetTileStream(this.meshMyId, this.localStream);
+        this.meshIsScreenSharing = false;
+        this.meshSavedCameraTrack = null;
+        this.meshCamOn = false; // カメラOFFに戻す（要件）
+        this._meshSyncControlButtonsUI();
+        this._meshSetTileStatus(this.meshMyId, this.meshMicOn, this.meshCamOn);
+        this._meshBroadcastState();
+    }
+
+    // ====================================================
+    // 招待・着信
+    // ====================================================
+
+    // [入口] 1対1通話の開始（旧 startOutgoingCall の置き換え）
+    async _startOneToOneMeshCall(targetName) {
+        if (this._meshIsInCall()) {
+            // 既に通話中 → 招待
+            return this._inviteToMeshCall(targetName);
+        }
+        if (!this.friendNames.has(targetName)) {
+            this.showNotification('通知', 'フレンドのみ通話できます', 'warning');
+            return;
+        }
+        if (this.blockedUsers.has(targetName)) {
+            this.showNotification('通知', 'ブロック中のユーザーには発信できません', 'warning');
+            return;
+        }
+
+        // 自分がホストとして通話を開始
+        const ok = await this._startMeshCall({ hostName: this.myName, isHost: true });
+        if (!ok) return;
+
+        // 相手に招待を送信し、callingModal表示
+        this.callTargetName = targetName;
+        this.el.callingTargetName.textContent = targetName;
+        this.el.callingModal.classList.add('visible');
+        this.outgoingMeshInvitees.add(targetName);
+
+        try {
+            const payload = encodeURIComponent(JSON.stringify({
+                roomId: this.meshRoomId,
+                hostName: this.myName,
+                inviterName: this.myName,
+                isGroupCall: false
+            }));
+            const res = await FbAPI.sendSignal(this.token, targetName, 'mesh_invite', payload);
+            if (!res.ok) {
+                this.el.callingModal.classList.remove('visible');
+                this.outgoingMeshInvitees.delete(targetName);
+                this.showNotification('エラー', '通話申請の送信に失敗しました: ' + (res.error || ''), 'error');
+                await this._leaveMeshCall(true);
+                return;
+            }
+        } catch (e) {
+            this.el.callingModal.classList.remove('visible');
+            this.outgoingMeshInvitees.delete(targetName);
+            this.showNotification('エラー', '通話申請の送信に失敗しました', 'error');
+            await this._leaveMeshCall(true);
+            return;
+        }
+
+        // タイムアウト（30秒）
+        clearTimeout(this._meshCallTimeout);
+        this._meshCallTimeout = setTimeout(async () => {
+            if (this.outgoingMeshInvitees.has(targetName)) {
+                this.outgoingMeshInvitees.delete(targetName);
+                if (this.el.callingModal.classList.contains('visible')) {
+                    this.el.callingModal.classList.remove('visible');
+                    this.showNotification('通知', '通話申請がタイムアウトしました', 'warning');
+                }
+                // 1対1呼び出しでタイムアウトなら通話自体を終了
+                if (this.meshPeers.size === 0) {
+                    await this._leaveMeshCall(true);
+                }
+            }
+        }, 30000);
+    }
+
+    // [入口] グループ通話の開始
+    async _startGroupMeshCall(groupId) {
+        // 最新のメンバー情報を取得（招待直後でキャッシュが古い場合に対応）
+        try { await this._loadGroups(); } catch (_) { }
+
+        const group = this.myGroups.find(g => g.id === groupId);
+        if (!group) {
+            this.showNotification('エラー', 'グループが見つかりません', 'error');
+            return;
+        }
+        if (this._meshIsInCall()) {
+            this.showNotification('通知', '既に通話中です', 'warning');
+            return;
+        }
+
+        // 既に他のホストの通話が進行中なら参加に誘導
+        if (this.activeGroupCalls.has(groupId)) {
+            const entry = this.activeGroupCalls.get(groupId);
+            if (entry.hostName !== this.myName) {
+                // 別ホストの通話があるなら参加する
+                return this._joinActiveGroupCall(groupId);
+            }
+        }
+
+        // Firebaseのグループに進行中通話を登録（他のメンバーがログイン中でなくても、後から見える）
+        try {
+            const res = await FbAPI.setGroupActiveCall(this.token, groupId, this.myName);
+            if (!res.ok) {
+                // 既に別ホストの通話が立っていた場合はそちらに参加する
+                if (res.existing && res.existing.hostName && res.existing.hostName !== this.myName) {
+                    this.activeGroupCalls.set(groupId, {
+                        hostName: res.existing.hostName,
+                        groupName: group.name,
+                        startedAt: res.existing.startedAt || Date.now()
+                    });
+                    this.showNotification('通知', `既に ${res.existing.hostName} さんが通話を開始しています。参加します。`, 'info', 2200);
+                    return this._joinActiveGroupCall(groupId);
+                }
+                this.showNotification('エラー', '通話の登録に失敗しました: ' + (res.error || ''), 'error');
+                return;
+            }
+        } catch (e) {
+            this.showNotification('エラー', '通話の登録に失敗しました', 'error');
+            return;
+        }
+
+        // 先に activeGroupCalls に登録（_startMeshCall → _meshEnterUI → _updateGroupCallBanner が参照するため）
+        this.activeGroupCalls.set(group.id, {
+            hostName: this.myName,
+            groupName: group.name,
+            startedAt: Date.now()
+        });
+
+        // 自分がホストとして通話を開始
+        const ok = await this._startMeshCall({
+            hostName: this.myName,
+            isHost: true,
+            groupContext: { groupId: group.id, groupName: group.name }
+        });
+        if (!ok) {
+            // 失敗したら登録も取り消す
+            this.activeGroupCalls.delete(group.id);
+            try { await FbAPI.clearGroupActiveCall(this.token, group.id); } catch (_) { }
+            this._updateGroupBadge();
+            this._refreshGroupListCallIndicator();
+            return;
+        }
+
+        // グループの他メンバー全員に「通話開始通知」を送信（オンライン中のメンバーへの即時通知用、補助）
+        const members = (group.members || []).filter(m => m !== this.myName);
+        if (members.length === 0) {
+            this.showNotification('通知', 'グループに他のメンバーがいません。あなた1人で待機中です', 'warning');
+            return;
+        }
+        const payload = encodeURIComponent(JSON.stringify({
+            roomId: this.meshRoomId,
+            hostName: this.myName,
+            groupId: group.id,
+            groupName: group.name
+        }));
+        for (const member of members) {
+            try {
+                await FbAPI.sendSignal(this.token, member, 'group_call_notify', payload);
+            } catch (e) {
+                console.warn('[mesh] グループ通話通知失敗:', member, e);
+            }
+        }
+    }
+
+    // [シグナル受信] グループ通話が始まった通知
+    async _onGroupCallNotified(signal) {
+        let payload;
+        try { payload = JSON.parse(decodeURIComponent(signal.signal_data)); } catch (_) { return; }
+        if (!payload || !payload.groupId || !payload.hostName) return;
+
+        // 自分がそのグループのメンバーであることを確認（招待保護）
+        let group = this.myGroups.find(g => g.id === payload.groupId);
+        // キャッシュにグループが無い、またはメンバー情報が古い場合は再ロード
+        if (!group || !(group.members || []).includes(this.myName)) {
+            try { await this._loadGroups(); } catch (_) { }
+            group = this.myGroups.find(g => g.id === payload.groupId);
+        }
+        if (!group) return;
+        if (!(group.members || []).includes(this.myName)) return;
+        if (this.blockedUsers.has(signal.from)) return;
+        // 自分自身がホストである通話の通知は無視
+        if (payload.hostName === this.myName) return;
+
+        // 進行中リストに登録
+        this.activeGroupCalls.set(payload.groupId, {
+            hostName: payload.hostName,
+            groupName: payload.groupName || group.name,
+            startedAt: Date.now()
+        });
+
+        // 該当グループチャットを開いていたらバナーを即時更新
+        if (this.currentGroupId === payload.groupId &&
+            this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupChatArea?.style.display !== 'none') {
+            this._updateGroupCallBanner(payload.groupId);
+        }
+        // グループ一覧表示中なら一覧を再描画して通話中インジケータを反映
+        if (this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupListArea?.style.display !== 'none') {
+            this._renderGroupList();
+        } else {
+            this._refreshGroupListCallIndicator();
+        }
+        // ヘッダのグループアイコンに「進行中通話あり」を示すドット表示を更新
+        this._updateGroupBadge();
+    }
+
+    // [シグナル受信] グループ通話が終わった通知（ホストが退出するときに送る）
+    _onGroupCallEnded(signal) {
+        let payload;
+        try { payload = JSON.parse(decodeURIComponent(signal.signal_data)); } catch (_) { return; }
+        if (!payload || !payload.groupId) return;
+        const entry = this.activeGroupCalls.get(payload.groupId);
+        if (!entry) return;
+        // ホスト本人からの通知のみ受理
+        if (entry.hostName !== signal.from) return;
+        this.activeGroupCalls.delete(payload.groupId);
+        if (this.currentGroupId === payload.groupId &&
+            this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupChatArea?.style.display !== 'none') {
+            this._updateGroupCallBanner(payload.groupId);
+        }
+        if (this.el.groupModal?.classList.contains('visible') &&
+            this.el.groupListArea?.style.display !== 'none') {
+            this._renderGroupList();
+        } else {
+            this._refreshGroupListCallIndicator();
+        }
+        this._updateGroupBadge();
+    }
+
+    // グループ通話の参加ボタンが押されたときの処理
+    async _joinActiveGroupCall(groupId) {
+        if (this._meshIsInCall()) {
+            if (this.meshGroupId === groupId) {
+                this.showNotification('通知', '既にこの通話に参加中です', 'info');
+                return;
+            }
+            this.showNotification('通知', '既に別の通話中です。先に終了してください', 'warning');
+            return;
+        }
+        // 最新の hostPeerId を取得するために Firebase を再ロード
+        // （ホスト交代直後はキャッシュが古い可能性があるため）
+        try { await this._loadGroups(); } catch (_) { }
+
+        const entry = this.activeGroupCalls.get(groupId);
+        if (!entry) {
+            this.showNotification('通知', 'この通話は既に終了しています', 'warning');
+            this._updateGroupCallBanner(groupId);
+            return;
+        }
+        const group = this.myGroups.find(g => g.id === groupId);
+        if (!group) return;
+        const hostPeerId = entry.hostPeerId;
+        if (!hostPeerId) {
+            this.showNotification('エラー', 'ホストPeerIDが取得できません。通話に参加できませんでした', 'error');
+            return;
+        }
+        // ゲストとして参加
+        await this._startMeshCall({
+            hostName: entry.hostName,
+            isHost: false,
+            groupContext: {
+                groupId: groupId,
+                groupName: entry.groupName || group.name,
+                hostPeerId: hostPeerId
+            }
+        });
+    }
+
+    // グループチャット内に「通話中バナー」を表示・非表示する
+    _updateGroupCallBanner(groupId) {
+        const bannerHost = document.getElementById('groupCallBanner');
+        // ヘッダの通話ボタンの見た目も同時に切替
+        const groupCallBtn = document.getElementById('groupCallBtn');
+        const entry = this.activeGroupCalls.get(groupId);
+        const alreadyIn = this._meshIsInCall() && this.meshGroupId === groupId;
+
+        // ヘッダボタンの見た目: 進行中 = 「参加」アイコン、無ければ「開始」アイコン
+        // 自分が参加中なら無効化（見た目はそのまま）
+        if (groupCallBtn) {
+            if (alreadyIn) {
+                groupCallBtn.disabled = true;
+                groupCallBtn.title = '通話に参加中';
+                groupCallBtn.innerHTML = '<i class="fas fa-phone-volume"></i>';
+            } else if (entry) {
+                groupCallBtn.disabled = false;
+                groupCallBtn.title = '進行中の通話に参加';
+                groupCallBtn.innerHTML = '<i class="fas fa-phone-volume"></i>';
+                groupCallBtn.classList.add('joining');
+            } else {
+                groupCallBtn.disabled = false;
+                groupCallBtn.title = 'グループ通話を開始';
+                groupCallBtn.innerHTML = '<i class="fas fa-phone"></i>';
+                groupCallBtn.classList.remove('joining');
+            }
+        }
+
+        if (!bannerHost) return;
+        if (!entry) {
+            bannerHost.style.display = 'none';
+            bannerHost.innerHTML = '';
+            return;
+        }
+        bannerHost.style.display = '';
+        if (alreadyIn) {
+            bannerHost.innerHTML = `
+                <div class="group-call-banner-inner active">
+                    <i class="fas fa-phone-volume"></i>
+                    <span class="group-call-banner-text">この通話に参加中です</span>
+                </div>
+            `;
+        } else {
+            bannerHost.innerHTML = `
+                <div class="group-call-banner-inner">
+                    <i class="fas fa-phone-volume"></i>
+                    <span class="group-call-banner-text"><strong>${this._escapeHtml(entry.hostName)}</strong> さんが通話を開始しました</span>
+                    <button id="groupCallJoinBtn" class="group-call-join-btn">
+                        <i class="fas fa-phone"></i> 参加する
+                    </button>
+                    <button id="groupCallResetBtn" class="group-call-reset-btn" title="繋がらない場合はここをタップ">
+                        <i class="fas fa-rotate-right"></i>
+                    </button>
+                </div>
+            `;
+            const joinBtn = document.getElementById('groupCallJoinBtn');
+            if (joinBtn) {
+                joinBtn.addEventListener('click', () => {
+                    // モーダルを閉じてから参加
+                    if (this.el.groupModal) this.el.groupModal.classList.remove('visible');
+                    this._joinActiveGroupCall(groupId);
+                });
+            }
+            const resetBtn = document.getElementById('groupCallResetBtn');
+            if (resetBtn) {
+                resetBtn.addEventListener('click', () => this._resetStaleGroupCall(groupId));
+            }
+        }
+    }
+
+    // ゾンビ通話をリセットする（ホストが既に居ない／応答しない場合の手動リカバリー）
+    async _resetStaleGroupCall(groupId) {
+        const entry = this.activeGroupCalls.get(groupId);
+        if (!entry) return;
+        if (!confirm(`「${entry.hostName}」が開始した通話をリセットしますか？\n（実際にまだ通話中の場合、メンバーが切断されます）`)) return;
+        try {
+            const res = await FbAPI.forceClearGroupActiveCall(this.token, groupId);
+            if (!res.ok) {
+                this.showNotification('エラー', 'リセットに失敗しました: ' + (res.error || ''), 'error');
+                return;
+            }
+            this.activeGroupCalls.delete(groupId);
+            this._updateGroupCallBanner(groupId);
+            this._refreshGroupListCallIndicator();
+            this._updateGroupBadge();
+            this.showNotification('通知', '通話をリセットしました', 'success', 2000);
+        } catch (e) {
+            this.showNotification('エラー', 'リセットに失敗しました', 'error');
+        }
+    }
+
+    // グループ一覧の通話インジケータを更新する（行に🟢を付ける）
+    _refreshGroupListCallIndicator() {
+        if (!this.el.groupListArea) return;
+        const rows = this.el.groupListArea.querySelectorAll('.dm-conv-item[data-gid]');
+        rows.forEach(row => {
+            const gid = row.dataset.gid;
+            // 既存のインジケータを除去
+            const existing = row.querySelector('.group-call-indicator');
+            if (existing) existing.remove();
+            if (this.activeGroupCalls.has(gid)) {
+                const span = document.createElement('span');
+                span.className = 'group-call-indicator';
+                span.innerHTML = '<i class="fas fa-phone-volume"></i> 通話中';
+                row.appendChild(span);
+            }
+        });
+    }
+
+    // [入口] 通話中に他のフレンドを追加招待
+    async _inviteToMeshCall(targetName) {
+        if (!this._meshIsInCall()) {
+            this.showNotification('エラー', '通話中ではありません', 'error');
+            return;
+        }
+        if (!this.friendNames.has(targetName)) {
+            this.showNotification('通知', 'フレンドのみ招待できます', 'warning');
+            return;
+        }
+        // グループ通話中は、グループメンバーのみ招待可
+        if (this.meshGroupId) {
+            const group = this.myGroups.find(g => g.id === this.meshGroupId);
+            const isMember = !!group && Array.isArray(group.members) && group.members.includes(targetName);
+            if (!isMember) {
+                this.showNotification('通知', 'グループ通話ではグループメンバー以外を招待できません', 'warning');
+                return;
+            }
+        }
+        // 既に参加中なら何もしない
+        for (const info of this.meshPeers.values()) {
+            if (info.name === targetName) {
+                this.showNotification('通知', `${targetName} は既に参加しています`, 'warning');
+                return;
+            }
+        }
+        if (targetName === this.myName) return;
+
+        // ルームID = ホスト名（自分がホストでなければ this.meshHostName）
+        const payload = encodeURIComponent(JSON.stringify({
+            roomId: this.meshRoomId,
+            hostName: this.meshHostName,
+            inviterName: this.myName,
+            isGroupCall: !!this.meshGroupId,
+            groupId: this.meshGroupId || null,
+            groupName: this.meshGroupName || null
+        }));
+        this.outgoingMeshInvitees.add(targetName);
+        try {
+            const res = await FbAPI.sendSignal(this.token, targetName, 'mesh_invite', payload);
+            if (!res.ok) {
+                this.outgoingMeshInvitees.delete(targetName);
+                this.showNotification('エラー', '招待の送信に失敗: ' + (res.error || ''), 'error');
+                return;
+            }
+            this.showNotification('招待', `${targetName} に招待を送信しました`, 'success', 2200);
+            // 一定時間後に招待中リストから消す
+            setTimeout(() => this.outgoingMeshInvitees.delete(targetName), 30000);
+        } catch (e) {
+            this.outgoingMeshInvitees.delete(targetName);
+            this.showNotification('エラー', '招待の送信に失敗しました', 'error');
+        }
+    }
+
+    // [シグナル受信] 招待が来た
+    _onMeshInviteReceived(signal) {
+        if (this.blockedUsers.has(signal.from)) {
+            FbAPI.sendSignal(this.token, signal.from, 'mesh_invite_reject',
+                encodeURIComponent(JSON.stringify({ reason: 'ブロックされています' }))).catch(() => { });
+            return;
+        }
+        let payload;
+        try { payload = JSON.parse(decodeURIComponent(signal.signal_data)); } catch (_) { return; }
+        if (!payload || !payload.roomId || !payload.hostName) return;
+
+        // 自分が既に通話中の場合
+        if (this._meshIsInCall()) {
+            // 同じルームの招待なら（多重招待）無視
+            if (this.meshRoomId === payload.roomId) return;
+            FbAPI.sendSignal(this.token, signal.from, 'mesh_invite_reject',
+                encodeURIComponent(JSON.stringify({ reason: '通話中' }))).catch(() => { });
+            return;
+        }
+
+        // グループ通話の招待の場合
+        if (payload.isGroupCall) {
+            // 自分がそのグループに所属していなければ拒否
+            const group = this.myGroups.find(g => g.id === payload.groupId);
+            const isMember = !!group && Array.isArray(group.members) && group.members.includes(this.myName);
+            if (!isMember) {
+                FbAPI.sendSignal(this.token, signal.from, 'mesh_invite_reject',
+                    encodeURIComponent(JSON.stringify({ reason: 'グループメンバーではありません' }))).catch(() => { });
+                return;
+            }
+            // 招待者もグループメンバーでなければ拒否
+            const inviterIsMember = !!group && Array.isArray(group.members) && group.members.includes(signal.from);
+            if (!inviterIsMember) {
+                FbAPI.sendSignal(this.token, signal.from, 'mesh_invite_reject',
+                    encodeURIComponent(JSON.stringify({ reason: '招待者がグループメンバーではありません' }))).catch(() => { });
+                return;
+            }
+        } else {
+            // 1対1招待: 招待元がフレンドであることを要求
+            if (!this.friendNames.has(signal.from)) {
+                FbAPI.sendSignal(this.token, signal.from, 'mesh_invite_reject',
+                    encodeURIComponent(JSON.stringify({ reason: 'フレンド以外からの招待は受け付けません' }))).catch(() => { });
+                return;
+            }
+        }
+
+        // pending として保持
+        this.pendingMeshInvite = { signal, payload };
+        // モーダル表示
+        this._showMeshIncomingCall(signal.from, payload);
+    }
+
+    _showMeshIncomingCall(fromName, payload) {
+        this._resetIncomingCallButtons();
+        this.el.incomingCallerName.textContent = payload.isGroupCall
+            ? `${fromName} (グループ: ${payload.groupName || '...'})`
+            : fromName;
+        this.el.incomingCallModal.classList.add('visible');
+
+        clearTimeout(this._meshIncomingTimeout);
+        this._meshIncomingTimeout = setTimeout(() => {
+            if (this.el.incomingCallModal.classList.contains('visible')) {
+                this._rejectMeshIncomingCall();
+            }
+        }, 30000);
+    }
+
+    // [UI] 招待を承認
+    async _acceptMeshIncomingCall() {
+        if (this._incomingCallHandled) return;
+        this._incomingCallHandled = true;
+
+        const acceptBtn = this.el.acceptCallBtn;
+        const rejectBtn = this.el.rejectCallBtn;
+        acceptBtn.classList.add('processing');
+        acceptBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 接続中...';
+        rejectBtn.disabled = true;
+
+        clearTimeout(this._meshIncomingTimeout);
+
+        const inv = this.pendingMeshInvite;
+        this.pendingMeshInvite = null;
+        if (!inv) {
+            this._resetIncomingCallButtons();
+            return;
+        }
+
+        this.el.incomingCallModal.classList.remove('visible');
+
+        // 招待者に accept 通知（情報のみ）
+        try {
+            await FbAPI.sendSignal(this.token, inv.signal.from, 'mesh_invite_accept',
+                encodeURIComponent(JSON.stringify({ roomId: inv.payload.roomId })));
+        } catch (_) { }
+
+        // メッシュ通話に参加（自分はゲスト）
+        await this._startMeshCall({
+            hostName: inv.payload.hostName,
+            isHost: false,
+            groupContext: inv.payload.isGroupCall
+                ? { groupId: inv.payload.groupId, groupName: inv.payload.groupName }
+                : null
+        });
+
+        this._resetIncomingCallButtons();
+    }
+
+    // [UI] 招待を拒否
+    async _rejectMeshIncomingCall() {
+        if (this._incomingCallHandled) return;
+        this._incomingCallHandled = true;
+
+        const acceptBtn = this.el.acceptCallBtn;
+        const rejectBtn = this.el.rejectCallBtn;
+        rejectBtn.classList.add('processing');
+        rejectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 拒否中...';
+        acceptBtn.disabled = true;
+
+        clearTimeout(this._meshIncomingTimeout);
+
+        const inv = this.pendingMeshInvite;
+        this.pendingMeshInvite = null;
+
+        if (inv) {
+            try {
+                await FbAPI.sendSignal(this.token, inv.signal.from, 'mesh_invite_reject',
+                    encodeURIComponent(JSON.stringify({ reason: '拒否' })));
+            } catch (_) { }
+        }
+
+        this.el.incomingCallModal.classList.remove('visible');
+        this._resetIncomingCallButtons();
+    }
+
+    // [シグナル受信] 招待拒否が来た
+    _onMeshInviteRejected(signal) {
+        let payload = {};
+        try { payload = JSON.parse(decodeURIComponent(signal.signal_data)); } catch (_) { }
+        // 1対1で呼び出し中なら通話を終了する
+        if (this.outgoingMeshInvitees.has(signal.from)) {
+            this.outgoingMeshInvitees.delete(signal.from);
+        }
+        // 呼び出し中モーダルが表示されていてかつ拒否されたのが対象者なら閉じる
+        if (this.el.callingModal.classList.contains('visible') && this.callTargetName === signal.from) {
+            clearTimeout(this._meshCallTimeout);
+            this.el.callingModal.classList.remove('visible');
+            this.showNotification('通知', `${signal.from} は通話を拒否しました${payload.reason ? `（${payload.reason}）` : ''}`, 'warning');
+            // 自分以外まだ誰もいないなら通話を終了
+            if (this.meshPeers.size === 0) {
+                this._leaveMeshCall(true);
+            }
+        } else {
+            this.showNotification('通知', `${signal.from} は通話を拒否しました${payload.reason ? `（${payload.reason}）` : ''}`, 'warning');
+        }
+    }
+
+    _onMeshInviteAccepted(signal) {
+        // 招待されたメンバーが acceptしたという通知のみ。実際の接続は相手から来る。
+        // callingModalが出ていれば閉じる（1対1のケース）
+        if (this.el.callingModal.classList.contains('visible') && this.callTargetName === signal.from) {
+            clearTimeout(this._meshCallTimeout);
+            const callingToEl = this.el.callingModal.querySelector('.calling-to');
+            const cancelBtn = document.getElementById('cancelCallBtn');
+            if (callingToEl) callingToEl.textContent = '接続中...';
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            // 少し待ってモーダルを閉じる
+            setTimeout(() => {
+                this.el.callingModal.classList.remove('visible');
+                if (callingToEl) callingToEl.textContent = '呼び出し中...';
+                if (cancelBtn) cancelBtn.style.display = '';
+            }, 800);
+        }
+    }
+
+    _onMeshInviteCanceled(signal) {
+        // 招待者がキャンセル
+        if (this.pendingMeshInvite && this.pendingMeshInvite.signal.from === signal.from) {
+            this.pendingMeshInvite = null;
+            clearTimeout(this._meshIncomingTimeout);
+            if (this.el.incomingCallModal.classList.contains('visible')) {
+                this.el.incomingCallModal.classList.remove('visible');
+                this.showNotification('通知', `${signal.from} が通話をキャンセルしました`, 'info');
+            }
+            this._resetIncomingCallButtons();
+        }
+    }
+
+    // 呼び出し中（callingModal）のキャンセル
+    async _cancelMeshOutgoingCall() {
+        clearTimeout(this._meshCallTimeout);
+        this.el.callingModal.classList.remove('visible');
+        const targetName = this.callTargetName;
+        if (targetName) {
+            try {
+                await FbAPI.sendSignal(this.token, targetName, 'mesh_invite_cancel',
+                    encodeURIComponent(JSON.stringify({ roomId: this.meshRoomId })));
+            } catch (_) { }
+            this.outgoingMeshInvitees.delete(targetName);
+        }
+        this.callTargetName = null;
+        // メッシュ通話自体も終了（まだ誰も参加していないので）
+        if (this.meshPeers.size === 0) {
+            await this._leaveMeshCall(true);
+        }
+    }
+
+    // ====================================================
+    // 招待モーダル（フレンド選択）
+    // ====================================================
+    showInviteFriendModal() {
+        if (!this._meshIsInCall()) return;
+        const modal = document.getElementById('meshInviteModal');
+        if (!modal) return;
+
+        // 既に参加中のメンバー
+        const memberNames = new Set();
+        memberNames.add(this.myName);
+        this.meshPeers.forEach(info => { if (info.name && info.name !== '...') memberNames.add(info.name); });
+
+        // 候補の絞り込み:
+        // - グループ通話中: 「自分のフレンド ∩ そのグループのメンバー」
+        // - 1対1通話中: 「自分のフレンド」全員
+        // どちらも未参加かつブロック中ではない
+        let candidates;
+        if (this.meshGroupId) {
+            const group = this.myGroups.find(g => g.id === this.meshGroupId);
+            const groupMembers = new Set(group?.members || []);
+            candidates = Array.from(this.friendNames).filter(name =>
+                groupMembers.has(name) &&
+                !memberNames.has(name) &&
+                !this.blockedUsers.has(name)
+            ).sort((a, b) => a.localeCompare(b, 'ja'));
+        } else {
+            candidates = Array.from(this.friendNames).filter(name =>
+                !memberNames.has(name) && !this.blockedUsers.has(name)
+            ).sort((a, b) => a.localeCompare(b, 'ja'));
+        }
+
+        // モーダル見出しの文言切替
+        const headerTitle = modal.querySelector('.mesh-invite-header h2');
+        const desc = modal.querySelector('.mesh-invite-desc');
+        if (this.meshGroupId) {
+            if (headerTitle) headerTitle.innerHTML = '<i class="fas fa-user-plus"></i> グループメンバーを招待';
+            if (desc) desc.textContent = 'グループに所属していて、まだ参加していないメンバーを招待できます。';
+        } else {
+            if (headerTitle) headerTitle.innerHTML = '<i class="fas fa-user-plus"></i> 通話に招待';
+            if (desc) desc.textContent = 'フレンドの中から、まだ参加していない人を招待できます。';
+        }
+
+        const list = document.getElementById('meshInviteList');
+        if (list) {
+            if (candidates.length === 0) {
+                const emptyMsg = this.meshGroupId
+                    ? '招待できるグループメンバーがいません'
+                    : '招待できるフレンドがいません';
+                list.innerHTML = `<div class="mesh-invite-empty"><i class="fas fa-user-slash"></i><p>${emptyMsg}</p></div>`;
+            } else {
+                list.innerHTML = candidates.map(name => {
+                    const av = this.avatarCache?.[name];
+                    const avatarHTML = av
+                        ? `<img class="mesh-invite-avatar" src="${av}" alt="">`
+                        : `<div class="mesh-invite-avatar mesh-invite-avatar-letter">${this._escapeHtml(name.charAt(0).toUpperCase())}</div>`;
+                    const isPending = this.outgoingMeshInvitees.has(name);
+                    return `
+                        <div class="mesh-invite-row" data-invite-name="${this._escapeHtml(name)}">
+                            ${avatarHTML}
+                            <div class="mesh-invite-name">${this._escapeHtml(name)}</div>
+                            <button class="mesh-invite-btn" ${isPending ? 'disabled' : ''}>
+                                <i class="fas fa-paper-plane"></i> ${isPending ? '招待済' : '招待'}
+                            </button>
+                        </div>
+                    `;
+                }).join('');
+                // イベントを付与
+                list.querySelectorAll('.mesh-invite-row').forEach(row => {
+                    const btn = row.querySelector('.mesh-invite-btn');
+                    if (!btn || btn.disabled) return;
+                    btn.addEventListener('click', async () => {
+                        const name = row.dataset.inviteName;
+                        btn.disabled = true;
+                        btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 送信中';
+                        await this._inviteToMeshCall(name);
+                        btn.innerHTML = '<i class="fas fa-check"></i> 招待済';
+                    });
+                });
+            }
+        }
+        modal.classList.add('visible');
+    }
+
+    hideInviteFriendModal() {
+        const modal = document.getElementById('meshInviteModal');
+        if (modal) modal.classList.remove('visible');
+    }
+
+    // ====================================================
+    // ヘルパー: HTMLエスケープ
+    // ====================================================
+    _escapeHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    // ====================================================
+    // ユーザー名の予測候補（カスタムドロップダウン）
+    // - 全アカウントを取得してキャッシュ
+    // - 入力にマッチする名前を絞り込み（部分一致・ひらがな/カタカナ変換対応）
+    // ====================================================
+
+    // 全アカウント一覧を取得してキャッシュ。getOnlineで取れるのはオンラインだけなので
+    // ここでは accounts ノードから全名を取得する
+    async _loadAllAccountNamesForSuggest() {
+        if (this._allAccountNamesFetching) return this._allAccountNamesFetching;
+        this._allAccountNamesFetching = (async () => {
+            try {
+                const names = await FbAPI.getAllAccountNames();
+                this._allAccountNames = names || [];
+            } catch (_) {
+                this._allAccountNames = this._allAccountNames || [];
+            }
+        })();
+        await this._allAccountNamesFetching;
+        this._allAccountNamesFetching = null;
+        this._allAccountNamesFetchedAt = Date.now();
+        return this._allAccountNames;
+    }
+
+    // 必要なら再取得する
+    async _ensureAllAccountNames() {
+        const STALE_MS = 60 * 1000; // 60秒キャッシュ
+        if (!this._allAccountNames || !this._allAccountNamesFetchedAt ||
+            (Date.now() - this._allAccountNamesFetchedAt) > STALE_MS) {
+            await this._loadAllAccountNamesForSuggest();
+        }
+        return this._allAccountNames || [];
+    }
+
+    // カタカナ→ひらがな変換（U+30A1〜U+30F6 を 0x60引いてひらがな化）
+    _toHiragana(s) {
+        return String(s || '').replace(/[\u30a1-\u30f6]/g, ch =>
+            String.fromCharCode(ch.charCodeAt(0) - 0x60));
+    }
+
+    // ひらがな→カタカナ
+    _toKatakana(s) {
+        return String(s || '').replace(/[\u3041-\u3096]/g, ch =>
+            String.fromCharCode(ch.charCodeAt(0) + 0x60));
+    }
+
+    // 文字列正規化: 小文字化＋ひらがな化（マッチングに使う）
+    _normalizeForMatch(s) {
+        return this._toHiragana(String(s || '').toLowerCase().normalize('NFKC'));
+    }
+
+    // 入力欄に対しサジェストポップアップを表示する
+    _showUserSuggest(inputEl) {
+        const popup = document.getElementById('userSuggestionPopup');
+        if (!popup || !inputEl) return;
+
+        const query = inputEl.value || '';
+        const normalizedQuery = this._normalizeForMatch(query);
+
+        // 候補リスト準備
+        const allNames = (this._allAccountNames || []).filter(n => n && n !== this.myName);
+        const blocked = this.blockedUsers || new Set();
+
+        // 「親しい人」の集合（フレンド/グループメンバー/DM相手）
+        const friendSet = this.friendNames || new Set();
+        const familiar = new Set();
+        friendSet.forEach(n => familiar.add(n));
+        if (Array.isArray(this.myGroups)) {
+            for (const g of this.myGroups) {
+                if (Array.isArray(g.members)) for (const m of g.members) familiar.add(m);
+            }
+        }
+        if (this.localChatDB) {
+            for (const key of Object.keys(this.localChatDB)) {
+                if (key.startsWith('dm:')) {
+                    const pair = key.slice(3).split('|');
+                    for (const p of pair) {
+                        if (p && p !== this.myName) familiar.add(p);
+                    }
+                }
+            }
+        }
+
+        // フィルタリング
+        let filtered;
+        if (normalizedQuery === '') {
+            // 空入力時: 「親しい人」を優先表示
+            filtered = allNames.filter(n => familiar.has(n));
+        } else {
+            filtered = allNames.filter(n => {
+                const norm = this._normalizeForMatch(n);
+                return norm.includes(normalizedQuery);
+            });
+        }
+
+        // 並び替え: 完全一致 > 前方一致 > 中間一致、各内で「親しい人優先」「辞書順」
+        filtered.sort((a, b) => {
+            const na = this._normalizeForMatch(a);
+            const nb = this._normalizeForMatch(b);
+            const ra = na === normalizedQuery ? 0 : (na.startsWith(normalizedQuery) ? 1 : 2);
+            const rb = nb === normalizedQuery ? 0 : (nb.startsWith(normalizedQuery) ? 1 : 2);
+            if (ra !== rb) return ra - rb;
+            const fa = familiar.has(a) ? 0 : 1;
+            const fb = familiar.has(b) ? 0 : 1;
+            if (fa !== fb) return fa - fb;
+            return a.localeCompare(b, 'ja');
+        });
+
+        // 最大8件
+        filtered = filtered.slice(0, 8);
+
+        if (filtered.length === 0) {
+            popup.innerHTML = `<div class="user-suggest-empty">候補がありません</div>`;
+        } else {
+            popup.innerHTML = filtered.map(n => {
+                const av = this.avatarCache?.[n];
+                const avatarHTML = av
+                    ? `<img class="user-suggest-avatar" src="${av}" alt="">`
+                    : `<div class="user-suggest-avatar user-suggest-avatar-letter">${this._escapeHtml(n.charAt(0).toUpperCase())}</div>`;
+                const isFamiliar = familiar.has(n);
+                const tag = friendSet.has(n)
+                    ? '<span class="user-suggest-tag friend">フレンド</span>'
+                    : (isFamiliar ? '<span class="user-suggest-tag known">既知</span>' : '');
+                // ハイライト: クエリ部分を <strong> で
+                let displayName;
+                if (normalizedQuery) {
+                    const norm = this._normalizeForMatch(n);
+                    const idx = norm.indexOf(normalizedQuery);
+                    if (idx >= 0) {
+                        const before = this._escapeHtml(n.slice(0, idx));
+                        const match = this._escapeHtml(n.slice(idx, idx + normalizedQuery.length));
+                        const after = this._escapeHtml(n.slice(idx + normalizedQuery.length));
+                        displayName = `${before}<mark>${match}</mark>${after}`;
+                    } else {
+                        displayName = this._escapeHtml(n);
+                    }
+                } else {
+                    displayName = this._escapeHtml(n);
+                }
+                return `
+                    <div class="user-suggest-item" data-name="${this._escapeHtml(n)}">
+                        ${avatarHTML}
+                        <span class="user-suggest-name">${displayName}</span>
+                        ${tag}
+                    </div>
+                `;
+            }).join('');
+            // クリックハンドラ
+            popup.querySelectorAll('.user-suggest-item').forEach(item => {
+                item.addEventListener('mousedown', (e) => {
+                    e.preventDefault(); // blurされない
+                    inputEl.value = item.dataset.name;
+                    this._hideUserSuggest();
+                    // input イベントを発火（バリデーションなどに反応させる）
+                    inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                });
+            });
+        }
+
+        // 位置を入力欄の直下に
+        const rect = inputEl.getBoundingClientRect();
+        popup.style.display = '';
+        popup.style.left = rect.left + 'px';
+        popup.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+        popup.style.width = Math.max(rect.width, 240) + 'px';
+        this._suggestActiveInput = inputEl;
+    }
+
+    _hideUserSuggest() {
+        const popup = document.getElementById('userSuggestionPopup');
+        if (popup) popup.style.display = 'none';
+        this._suggestActiveInput = null;
+    }
+
+    // 入力欄にサジェストを bind する
+    _bindSuggestInput(inp) {
+        if (!inp || inp._suggestBound) return;
+        inp._suggestBound = true;
+        inp.addEventListener('focus', async () => {
+            await this._ensureAllAccountNames();
+            this._showUserSuggest(inp);
+        });
+        inp.addEventListener('input', () => {
+            this._showUserSuggest(inp);
+        });
+        inp.addEventListener('blur', () => {
+            // クリック処理が走るまで少し待ってから閉じる
+            setTimeout(() => this._hideUserSuggest(), 150);
+        });
+        // Enter キーは既存ハンドラに任せる
     }
 }
 
