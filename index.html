@@ -6,9 +6,9 @@
     <title>LinkUp</title>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <link href="style.css" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
     <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
-    <!-- Firebase SDK (compat版 - シンプルなAPIで使いやすい) -->
+    <!-- Firebase SDK (compat版) -->
     <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-database-compat.js"></script>
     <!-- Firebase 設定（自分のプロジェクトの設定に書き換えてください） -->
@@ -870,6 +870,9 @@
 <!-- 入力欄のユーザー名予測候補ポップアップ（カスタム） -->
 <div id="userSuggestionPopup" class="user-suggest-popup" style="display:none"></div>
 
+<!-- アプリケーション スクリプト（読み込み順に注意） -->
+<script src="core.js"></script>
 <script src="app.js"></script>
+<script src="main.js"></script>
 </body>
 </html>
